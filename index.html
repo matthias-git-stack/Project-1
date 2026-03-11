@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Account Ledger</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <h1>Account Ledger</h1>
+      <nav class="tab-nav">
+        <button class="tab-btn active" data-tab="journal">Journal Entries</button>
+        <button class="tab-btn" data-tab="ledger">General Ledger</button>
+        <button class="tab-btn" data-tab="accounts">Chart of Accounts</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="main-content">
+
+    <!-- ── Journal Entries Tab ── -->
+    <section id="tab-journal" class="tab-panel active">
+
+      <div class="panel-header">
+        <h2>Journal Entries</h2>
+        <button id="btn-new-entry" class="btn btn-primary">+ New Entry</button>
+      </div>
+
+      <!-- New / Edit Entry Form -->
+      <div id="entry-form-container" class="card hidden">
+        <h3 id="form-title">New Journal Entry</h3>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="entry-date">Date</label>
+            <input type="date" id="entry-date" />
+          </div>
+          <div class="form-group">
+            <label for="entry-ref">Reference #</label>
+            <input type="text" id="entry-ref" placeholder="e.g. JE-001" />
+          </div>
+          <div class="form-group wide">
+            <label for="entry-memo">Memo / Description</label>
+            <input type="text" id="entry-memo" placeholder="Describe the transaction" />
+          </div>
+        </div>
+
+        <!-- Line Items Table -->
+        <div class="table-scroll">
+          <table class="line-items-table" id="line-items-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>GL Account</th>
+                <th>Description</th>
+                <th class="amount-col">Debit</th>
+                <th class="amount-col">Credit</th>
+                <th class="action-col"></th>
+              </tr>
+            </thead>
+            <tbody id="line-items-body">
+              <!-- rows injected by JS -->
+            </tbody>
+            <tfoot>
+              <tr id="totals-row">
+                <td colspan="3" class="totals-label">Totals</td>
+                <td class="amount-col" id="total-debit">0.00</td>
+                <td class="amount-col" id="total-credit">0.00</td>
+                <td></td>
+              </tr>
+              <tr id="balance-row">
+                <td colspan="6" id="balance-msg" class="balance-ok">Entry is balanced</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        <div class="form-actions-row">
+          <button id="btn-add-line" class="btn btn-secondary">+ Add Line</button>
+          <div class="spacer"></div>
+          <button id="btn-cancel-entry" class="btn btn-ghost">Cancel</button>
+          <button id="btn-save-entry" class="btn btn-primary">Post Entry</button>
+        </div>
+      </div>
+
+      <!-- Posted Entries List -->
+      <div id="entries-list">
+        <div id="no-entries-msg" class="empty-state">
+          <p>No journal entries yet. Click <strong>+ New Entry</strong> to get started.</p>
+        </div>
+        <div id="entries-table-container" class="hidden">
+          <table class="data-table" id="entries-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Reference</th>
+                <th>Memo</th>
+                <th class="amount-col">Total Debits</th>
+                <th class="amount-col">Total Credits</th>
+                <th class="action-col">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="entries-tbody">
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ── General Ledger Tab ── -->
+    <section id="tab-ledger" class="tab-panel">
+
+      <div class="panel-header">
+        <h2>General Ledger</h2>
+        <div class="filter-row">
+          <label for="ledger-account-filter">Account:</label>
+          <select id="ledger-account-filter">
+            <option value="">— All Accounts —</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="ledger-content">
+        <div id="no-ledger-msg" class="empty-state">
+          <p>Post journal entries to see ledger activity.</p>
+        </div>
+        <div id="ledger-table-container" class="hidden">
+          <table class="data-table" id="ledger-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Reference</th>
+                <th>Account</th>
+                <th>Memo</th>
+                <th class="amount-col">Debit</th>
+                <th class="amount-col">Credit</th>
+                <th class="amount-col">Balance</th>
+              </tr>
+            </thead>
+            <tbody id="ledger-tbody">
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ── Chart of Accounts Tab ── -->
+    <section id="tab-accounts" class="tab-panel">
+
+      <div class="panel-header">
+        <h2>Chart of Accounts</h2>
+        <button id="btn-new-account" class="btn btn-primary">+ Add Account</button>
+      </div>
+
+      <!-- Add Account Form -->
+      <div id="account-form-container" class="card hidden">
+        <h3>New GL Account</h3>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="acct-number">Account #</label>
+            <input type="text" id="acct-number" placeholder="e.g. 1050" />
+          </div>
+          <div class="form-group wide">
+            <label for="acct-name">Account Name</label>
+            <input type="text" id="acct-name" placeholder="e.g. Petty Cash" />
+          </div>
+          <div class="form-group">
+            <label for="acct-type">Type</label>
+            <select id="acct-type">
+              <option value="Asset">Asset</option>
+              <option value="Liability">Liability</option>
+              <option value="Equity">Equity</option>
+              <option value="Revenue">Revenue</option>
+              <option value="Expense">Expense</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="acct-normal">Normal Balance</label>
+            <select id="acct-normal">
+              <option value="Debit">Debit</option>
+              <option value="Credit">Credit</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-actions-row">
+          <div class="spacer"></div>
+          <button id="btn-cancel-account" class="btn btn-ghost">Cancel</button>
+          <button id="btn-save-account" class="btn btn-primary">Save Account</button>
+        </div>
+      </div>
+
+      <div id="coa-content">
+        <table class="data-table" id="coa-table">
+          <thead>
+            <tr>
+              <th>Account #</th>
+              <th>Account Name</th>
+              <th>Type</th>
+              <th>Normal Balance</th>
+              <th class="amount-col">Balance</th>
+            </tr>
+          </thead>
+          <tbody id="coa-tbody">
+          </tbody>
+        </table>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Entry Detail Modal -->
+  <div id="entry-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-title">Journal Entry Detail</h3>
+        <button class="modal-close" id="modal-close">&times;</button>
+      </div>
+      <div id="modal-body" class="modal-body">
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
