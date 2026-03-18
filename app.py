@@ -44,105 +44,26 @@ DEFAULT_ACCOUNTS = [
     {"id": "x5900", "number": "5900", "name": "Income Tax Expense",          "type": "Expense",   "normal": "Debit"},
 ]
 
-# ── Session State Init ──────────────────────────────────────────────────────
-def init_state():
-    if "accounts" not in st.session_state:
-        st.session_state.accounts = [a.copy() for a in DEFAULT_ACCOUNTS]
-    if "entries" not in st.session_state:
-        st.session_state.entries = []
-    if "next_entry_id" not in st.session_state:
-        st.session_state.next_entry_id = 1
-    if "show_entry_form" not in st.session_state:
-        st.session_state.show_entry_form = False
-    if "editing_entry_id" not in st.session_state:
-        st.session_state.editing_entry_id = None
-    if "form_date" not in st.session_state:
-        st.session_state.form_date = date.today()
-    if "form_ref" not in st.session_state:
-        st.session_state.form_ref = ""
-    if "form_memo" not in st.session_state:
-        st.session_state.form_memo = ""
-    if "form_lines" not in st.session_state:
-        st.session_state.form_lines = []
-    if "view_entry_id" not in st.session_state:
-        st.session_state.view_entry_id = None
-    if "show_account_form" not in st.session_state:
-        st.session_state.show_account_form = False
+ENTITY_TYPES = [
+    "Individual",
+    "Joint Account",
+    "Trust",
+    "LLC",
+    "Partnership",
+    "S-Corp",
+    "C-Corp",
+    "IRA",
+    "Roth IRA",
+    "Foundation",
+    "Other",
+]
 
-init_state()
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
+# ── Formatting ───────────────────────────────────────────────────────────────
 def fmt(n):
     return f"{float(n):,.2f}"
 
-def account_by_id(account_id):
-    return next((a for a in st.session_state.accounts if a["id"] == account_id), None)
-
-def account_label(acct):
-    if not acct:
-        return ""
-    return f"{acct['number']} — {acct['name']}"
-
-def get_account_options():
-    sorted_accts = sorted(st.session_state.accounts, key=lambda x: x["number"])
-    return [account_label(a) for a in sorted_accts]
-
-def label_to_account(label):
-    for a in st.session_state.accounts:
-        if account_label(a) == label:
-            return a
-    return None
-
-def compute_balances():
-    balances = {a["id"]: 0.0 for a in st.session_state.accounts}
-    for entry in st.session_state.entries:
-        for line in entry["lines"]:
-            acct = account_by_id(line["account_id"])
-            if not acct:
-                continue
-            delta = line.get("debit", 0.0) - line.get("credit", 0.0)
-            if acct["normal"] == "Credit":
-                delta = -delta
-            balances[line["account_id"]] = balances.get(line["account_id"], 0.0) + delta
-    return balances
-
-def auto_ref():
-    return f"JE-{st.session_state.next_entry_id:04d}"
-
-def open_entry_form(entry=None):
-    st.session_state.show_entry_form = True
-    st.session_state.view_entry_id = None
-    st.session_state.editing_entry_id = entry["id"] if entry else None
-    if entry:
-        st.session_state.form_date = datetime.strptime(entry["date"], "%Y-%m-%d").date()
-        st.session_state.form_ref = entry["reference"]
-        st.session_state.form_memo = entry["memo"]
-        st.session_state.form_lines = [
-            {
-                "account": account_label(account_by_id(l["account_id"])),
-                "description": l.get("description", ""),
-                "debit": l.get("debit", 0.0),
-                "credit": l.get("credit", 0.0),
-            }
-            for l in entry["lines"]
-        ]
-    else:
-        st.session_state.form_date = date.today()
-        st.session_state.form_ref = auto_ref()
-        st.session_state.form_memo = ""
-        st.session_state.form_lines = [
-            {"account": "", "description": "", "debit": 0.0, "credit": 0.0},
-            {"account": "", "description": "", "debit": 0.0, "credit": 0.0},
-        ]
-
-def close_entry_form():
-    st.session_state.show_entry_form = False
-    st.session_state.editing_entry_id = None
-    st.session_state.form_lines = []
-
-# ── Report Formatting ───────────────────────────────────────────────────────
 def fmt_acct(n):
-    """CPA-style: negatives in parentheses, zero as dash."""
+    """CPA-style: negatives in parentheses, zero as em-dash."""
     if n is None:
         return ""
     n = float(n)
@@ -152,44 +73,205 @@ def fmt_acct(n):
         return f"({abs(n):,.2f})"
     return f"{n:,.2f}"
 
-# ── Cash Flow Account Classification ───────────────────────────────────────
-CASH_ACCOUNT_IDS = {"a1000", "a1010"}
-OPERATING_WC_ASSETS = {"a1200", "a1300", "a1400"}
-OPERATING_WC_LIABILITIES = {"l2000", "l2100", "l2300", "l2400"}
-DEPRECIATION_EXPENSE_ID = "x5400"
-ACCUM_DEPRECIATION_ID = "a1600"
-INVESTING_ACCOUNT_IDS = {"a1500"}
-FINANCING_ACCOUNT_IDS = {"l2200", "e3000", "e3100", "e3300"}
+# ── Cash Flow Classification (by account NUMBER for consolidation safety) ────
+# Using account numbers as canonical identifiers so classification works
+# for both single-entity (id-based) and consolidated (number-as-id) contexts.
+CASH_ACCOUNT_NUMBERS        = {"1000", "1010"}
+OPERATING_WC_ASSET_NUMBERS  = {"1200", "1300", "1400"}
+OPERATING_WC_LIAB_NUMBERS   = {"2000", "2100", "2300", "2400"}
+DEPRECIATION_EXPENSE_NUMBER = "5400"
+ACCUM_DEPRECIATION_NUMBER   = "1600"
+INVESTING_ACCOUNT_NUMBERS   = {"1500"}
+FINANCING_ACCOUNT_NUMBERS   = {"2200", "3000", "3100", "3300"}
 
 def classify_for_cashflow(acct):
-    """Classify an account for cash flow statement purposes."""
-    aid = acct["id"]
-    if aid in CASH_ACCOUNT_IDS:
-        return "cash"
-    if aid == DEPRECIATION_EXPENSE_ID:
-        return "depr_expense"
-    if aid == ACCUM_DEPRECIATION_ID:
-        return "accum_depr"
-    if acct["type"] in ("Revenue", "Expense"):
-        return "net_income"
-    if aid in OPERATING_WC_ASSETS:
-        return "operating_asset"
-    if aid in OPERATING_WC_LIABILITIES:
-        return "operating_liability"
-    if aid in INVESTING_ACCOUNT_IDS:
-        return "investing"
-    if aid in FINANCING_ACCOUNT_IDS:
-        return "financing"
+    num = acct["number"]
+    if num in CASH_ACCOUNT_NUMBERS:        return "cash"
+    if num == DEPRECIATION_EXPENSE_NUMBER: return "depr_expense"
+    if num == ACCUM_DEPRECIATION_NUMBER:   return "accum_depr"
+    if acct["type"] in ("Revenue", "Expense"): return "net_income"
+    if num in OPERATING_WC_ASSET_NUMBERS:  return "operating_asset"
+    if num in OPERATING_WC_LIAB_NUMBERS:   return "operating_liability"
+    if num in INVESTING_ACCOUNT_NUMBERS:   return "investing"
+    if num in FINANCING_ACCOUNT_NUMBERS:   return "financing"
     # Custom accounts: classify by type
-    if acct["type"] == "Asset":
-        return "investing"
-    if acct["type"] == "Liability":
-        return "operating_liability"
-    if acct["type"] == "Equity":
-        return "financing"
+    if acct["type"] == "Asset":     return "investing"
+    if acct["type"] == "Liability": return "operating_liability"
+    if acct["type"] == "Equity":    return "financing"
     return "operating_liability"
 
-# ── Period Boundary Computation ─────────────────────────────────────────────
+# ── State Init & Migration ───────────────────────────────────────────────────
+def _new_entity_dict(name, entity_type, description="",
+                     accounts=None, entries=None, next_entry_id=1, eid=None):
+    if eid is None:
+        eid = f"entity_{int(datetime.now().timestamp() * 1000)}"
+    return {
+        "id":            eid,
+        "name":          name,
+        "type":          entity_type,
+        "description":   description,
+        "accounts":      accounts if accounts is not None else [a.copy() for a in DEFAULT_ACCOUNTS],
+        "entries":       entries  if entries  is not None else [],
+        "next_entry_id": next_entry_id,
+    }
+
+def init_state():
+    # ── Migrate legacy flat state (single-entity → multi-entity) ──
+    if "accounts" in st.session_state and "entities" not in st.session_state:
+        migrated = _new_entity_dict(
+            "My Entity", "Other", "",
+            accounts=st.session_state.pop("accounts"),
+            entries=st.session_state.pop("entries", []),
+            next_entry_id=st.session_state.pop("next_entry_id", 1),
+            eid="entity_default",
+        )
+        st.session_state.entities = {"entity_default": migrated}
+        st.session_state.active_entity_id = "entity_default"
+
+    # ── Fresh initialisation ──
+    if "entities" not in st.session_state:
+        e = _new_entity_dict("Client 1", "Individual", eid="entity_001")
+        st.session_state.entities = {"entity_001": e}
+        st.session_state.active_entity_id = "entity_001"
+
+    # ── Guard: active entity must exist ──
+    if st.session_state.get("active_entity_id") not in st.session_state.entities:
+        st.session_state.active_entity_id = next(iter(st.session_state.entities))
+
+    # ── UI state defaults ──
+    for key, default in [
+        ("show_entry_form",    False),
+        ("editing_entry_id",   None),
+        ("form_date",          date.today()),
+        ("form_ref",           ""),
+        ("form_memo",          ""),
+        ("form_lines",         []),
+        ("view_entry_id",      None),
+        ("show_account_form",  False),
+        ("show_entity_form",   False),
+        ("editing_entity_id",  None),
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+init_state()
+
+# ── Entity Accessors ─────────────────────────────────────────────────────────
+def active_eid():
+    return st.session_state.active_entity_id
+
+def get_active_entity():
+    return st.session_state.entities[active_eid()]
+
+def get_accounts(entity_id=None):
+    return st.session_state.entities[entity_id or active_eid()]["accounts"]
+
+def get_entries(entity_id=None):
+    return st.session_state.entities[entity_id or active_eid()]["entries"]
+
+def get_next_id(entity_id=None):
+    return st.session_state.entities[entity_id or active_eid()]["next_entry_id"]
+
+def increment_next_id(entity_id=None):
+    st.session_state.entities[entity_id or active_eid()]["next_entry_id"] += 1
+
+def set_active_entity(eid):
+    st.session_state.active_entity_id = eid
+    close_entry_form()
+    st.session_state.show_account_form = False
+    st.session_state.view_entry_id = None
+
+def create_entity(name, entity_type, description=""):
+    e = _new_entity_dict(name, entity_type, description)
+    st.session_state.entities[e["id"]] = e
+    return e["id"]
+
+def update_entity(eid, name, entity_type, description):
+    e = st.session_state.entities[eid]
+    e["name"] = name
+    e["type"] = entity_type
+    e["description"] = description
+
+def delete_entity(eid):
+    if len(st.session_state.entities) <= 1:
+        return False
+    del st.session_state.entities[eid]
+    if active_eid() == eid:
+        st.session_state.active_entity_id = next(iter(st.session_state.entities))
+    return True
+
+# ── Account Helpers (default to active entity) ───────────────────────────────
+def account_by_id(account_id, accounts=None):
+    if accounts is None:
+        accounts = get_accounts()
+    return next((a for a in accounts if a["id"] == account_id), None)
+
+def account_label(acct):
+    return f"{acct['number']} — {acct['name']}" if acct else ""
+
+def get_account_options(accounts=None):
+    if accounts is None:
+        accounts = get_accounts()
+    return [account_label(a) for a in sorted(accounts, key=lambda x: x["number"])]
+
+def label_to_account(label, accounts=None):
+    if accounts is None:
+        accounts = get_accounts()
+    return next((a for a in accounts if account_label(a) == label), None)
+
+def compute_balances(accounts=None, entries=None):
+    if accounts is None: accounts = get_accounts()
+    if entries  is None: entries  = get_entries()
+    balances = {a["id"]: 0.0 for a in accounts}
+    for entry in entries:
+        for line in entry["lines"]:
+            acct = next((a for a in accounts if a["id"] == line["account_id"]), None)
+            if not acct:
+                continue
+            dr, cr = line.get("debit", 0.0), line.get("credit", 0.0)
+            delta = (dr - cr) if acct["normal"] == "Debit" else (cr - dr)
+            balances[acct["id"]] = balances.get(acct["id"], 0.0) + delta
+    return balances
+
+# ── Consolidated Context Builder ─────────────────────────────────────────────
+def build_report_context(entity_ids):
+    """
+    Merge accounts and entries from multiple entities for consolidated reporting.
+
+    Merging rule: accounts with the same number are treated as the same GL
+    account (first entity's metadata wins). Each entry's account_id lines are
+    re-mapped so that the account's NUMBER becomes its canonical ID, ensuring
+    cross-entity lookups resolve correctly.
+    """
+    acct_by_number = {}   # number → canonical account dict  (id = number)
+    for eid in entity_ids:
+        for acct in st.session_state.entities.get(eid, {}).get("accounts", []):
+            if acct["number"] not in acct_by_number:
+                acct_by_number[acct["number"]] = {**acct, "id": acct["number"]}
+
+    merged_accounts = sorted(acct_by_number.values(), key=lambda a: a["number"])
+
+    merged_entries = []
+    for eid in entity_ids:
+        entity = st.session_state.entities.get(eid, {})
+        entity_name = entity.get("name", eid)
+        id_to_number = {a["id"]: a["number"] for a in entity.get("accounts", [])}
+        for entry in entity.get("entries", []):
+            new_lines = []
+            for line in entry["lines"]:
+                num = id_to_number.get(line["account_id"])
+                if num:
+                    new_lines.append({**line, "account_id": num})
+            if new_lines:
+                merged_entries.append({
+                    **entry,
+                    "lines": new_lines,
+                    "entity_name": entity_name,
+                })
+
+    return merged_accounts, merged_entries
+
+# ── Period Boundaries ────────────────────────────────────────────────────────
 def get_period_boundaries(start_dt, end_dt, grouping):
     """Return list of (label, period_start, period_end) tuples."""
     if grouping == "None":
@@ -200,553 +282,558 @@ def get_period_boundaries(start_dt, end_dt, grouping):
     if grouping == "Monthly":
         cursor = start_dt.replace(day=1)
         while cursor <= end_dt:
-            _, last_day = monthrange(cursor.year, cursor.month)
-            p_end = cursor.replace(day=last_day)
-            p_start = max(cursor, start_dt)
-            p_end = min(p_end, end_dt)
-            label = cursor.strftime("%b %Y")
-            periods.append((label, p_start, p_end))
-            # Advance to next month
-            if cursor.month == 12:
-                cursor = cursor.replace(year=cursor.year + 1, month=1, day=1)
-            else:
-                cursor = cursor.replace(month=cursor.month + 1, day=1)
+            _, last = monthrange(cursor.year, cursor.month)
+            periods.append((
+                cursor.strftime("%b %Y"),
+                max(cursor, start_dt),
+                min(cursor.replace(day=last), end_dt),
+            ))
+            # Advance to first of next month
+            cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+
     elif grouping == "Quarterly":
-        # Find start of quarter containing start_dt
         q_month = ((start_dt.month - 1) // 3) * 3 + 1
         cursor = start_dt.replace(month=q_month, day=1)
         while cursor <= end_dt:
-            q_end_month = cursor.month + 2
-            q_end_year = cursor.year
-            if q_end_month > 12:
-                q_end_month -= 12
-                q_end_year += 1
-            _, last_day = monthrange(q_end_year, q_end_month)
-            p_end = date(q_end_year, q_end_month, last_day)
-            p_start = max(cursor, start_dt)
-            p_end_clamped = min(p_end, end_dt)
-            q_num = (cursor.month - 1) // 3 + 1
-            label = f"Q{q_num} {cursor.year}"
-            periods.append((label, p_start, p_end_clamped))
-            # Advance to next quarter
-            next_month = cursor.month + 3
-            next_year = cursor.year
-            if next_month > 12:
-                next_month -= 12
-                next_year += 1
-            cursor = date(next_year, next_month, 1)
+            em = cursor.month + 2
+            ey = cursor.year + (em - 1) // 12
+            em = (em - 1) % 12 + 1
+            _, last = monthrange(ey, em)
+            q = (cursor.month - 1) // 3 + 1
+            periods.append((
+                f"Q{q} {cursor.year}",
+                max(cursor, start_dt),
+                min(date(ey, em, last), end_dt),
+            ))
+            nm = cursor.month + 3
+            cursor = date(cursor.year + (nm - 1) // 12, (nm - 1) % 12 + 1, 1)
+
     elif grouping == "Yearly":
         cursor = start_dt.replace(month=1, day=1)
         while cursor <= end_dt:
-            p_end = cursor.replace(month=12, day=31)
-            p_start = max(cursor, start_dt)
-            p_end_clamped = min(p_end, end_dt)
-            label = str(cursor.year)
-            periods.append((label, p_start, p_end_clamped))
+            periods.append((
+                str(cursor.year),
+                max(cursor, start_dt),
+                min(cursor.replace(month=12, day=31), end_dt),
+            ))
             cursor = cursor.replace(year=cursor.year + 1)
 
     return periods
 
-# ── Entry Filtering & Activity Computation ──────────────────────────────────
-def entries_in_range(start_dt, end_dt):
-    """Return entries whose date falls within [start_dt, end_dt]."""
-    s = start_dt.strftime("%Y-%m-%d")
-    e = end_dt.strftime("%Y-%m-%d")
-    return [
-        entry for entry in st.session_state.entries
-        if s <= entry["date"] <= e
-    ]
+# ── Core Computation (data-explicit; work for both single & consolidated) ────
+def _filter_entries(entries, start_dt, end_dt):
+    s, e = start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
+    return [en for en in entries if s <= en["date"] <= e]
 
-def compute_activity(start_dt, end_dt):
-    """
-    Compute net activity per account for entries in [start_dt, end_dt].
-    Returns dict: account_id -> activity in normal-balance direction.
-    Positive = balance increased in normal direction.
-    """
+def compute_activity(start_dt, end_dt, accounts=None, entries=None):
+    """Net activity per account in normal-balance direction for a date range."""
+    if accounts is None: accounts = get_accounts()
+    if entries  is None: entries  = get_entries()
+    acct_map = {a["id"]: a for a in accounts}
     activity = {}
-    for entry in entries_in_range(start_dt, end_dt):
+    for entry in _filter_entries(entries, start_dt, end_dt):
         for line in entry["lines"]:
-            aid = line["account_id"]
-            acct = account_by_id(aid)
+            acct = acct_map.get(line["account_id"])
             if not acct:
                 continue
-            dr = line.get("debit", 0.0)
-            cr = line.get("credit", 0.0)
-            if acct["normal"] == "Debit":
-                delta = dr - cr
-            else:
-                delta = cr - dr
-            activity[aid] = activity.get(aid, 0.0) + delta
+            dr, cr = line.get("debit", 0.0), line.get("credit", 0.0)
+            delta = (dr - cr) if acct["normal"] == "Debit" else (cr - dr)
+            activity[line["account_id"]] = activity.get(line["account_id"], 0.0) + delta
     return activity
 
-def compute_cumulative_balances_as_of(as_of_date):
-    """Compute cumulative balances for all accounts through as_of_date."""
+def compute_cumulative_balances_as_of(as_of_date, accounts=None, entries=None):
+    """Cumulative normal-direction balance per account through as_of_date."""
+    if accounts is None: accounts = get_accounts()
+    if entries  is None: entries  = get_entries()
     d = as_of_date.strftime("%Y-%m-%d")
-    balances = {a["id"]: 0.0 for a in st.session_state.accounts}
-    for entry in st.session_state.entries:
+    acct_map = {a["id"]: a for a in accounts}
+    balances = {a["id"]: 0.0 for a in accounts}
+    for entry in entries:
         if entry["date"] > d:
             continue
         for line in entry["lines"]:
-            acct = account_by_id(line["account_id"])
+            acct = acct_map.get(line["account_id"])
             if not acct:
                 continue
-            dr = line.get("debit", 0.0)
-            cr = line.get("credit", 0.0)
-            if acct["normal"] == "Debit":
-                balances[line["account_id"]] += dr - cr
-            else:
-                balances[line["account_id"]] += cr - dr
+            dr, cr = line.get("debit", 0.0), line.get("credit", 0.0)
+            delta = (dr - cr) if acct["normal"] == "Debit" else (cr - dr)
+            balances[line["account_id"]] = balances.get(line["account_id"], 0.0) + delta
     return balances
 
-def compute_raw_activity(start_dt, end_dt):
-    """
-    Compute raw debit-minus-credit per account (not normal-adjusted).
-    Positive = net debit, Negative = net credit.
-    """
+def compute_raw_activity(start_dt, end_dt, entries=None):
+    """Raw (debit − credit) per account for a date range; sign not adjusted."""
+    if entries is None: entries = get_entries()
     activity = {}
-    for entry in entries_in_range(start_dt, end_dt):
+    for entry in _filter_entries(entries, start_dt, end_dt):
         for line in entry["lines"]:
             aid = line["account_id"]
-            dr = line.get("debit", 0.0)
-            cr = line.get("credit", 0.0)
+            dr, cr = line.get("debit", 0.0), line.get("credit", 0.0)
             activity[aid] = activity.get(aid, 0.0) + (dr - cr)
     return activity
 
-# ── Report Generators ───────────────────────────────────────────────────────
-
-def generate_trial_balance(start_dt, end_dt, grouping):
-    """Generate Trial Balance: cumulative balances as of each period end."""
+# ── Report Generators ────────────────────────────────────────────────────────
+def generate_trial_balance(start_dt, end_dt, grouping, accounts=None, entries=None):
+    """Trial Balance: cumulative balances as of each period-end date."""
+    if accounts is None: accounts = get_accounts()
+    if entries  is None: entries  = get_entries()
     periods = get_period_boundaries(start_dt, end_dt, grouping)
+    sorted_accts = sorted(accounts, key=lambda a: a["number"])
     type_order = ["Asset", "Liability", "Equity", "Revenue", "Expense"]
-    sorted_accts = sorted(st.session_state.accounts, key=lambda a: a["number"])
 
     rows = []
-    period_totals_dr = {p[0]: 0.0 for p in periods}
-    period_totals_cr = {p[0]: 0.0 for p in periods}
+    totals_dr = {p[0]: 0.0 for p in periods}
+    totals_cr = {p[0]: 0.0 for p in periods}
 
     for acct_type in type_order:
         accts = [a for a in sorted_accts if a["type"] == acct_type]
         if not accts:
             continue
-        # Section header
-        row = {"Account #": "", "Account Name": f"── {acct_type}s ──"}
-        for label, _, _ in periods:
-            row[f"{label} Dr"] = ""
-            row[f"{label} Cr"] = ""
-        rows.append(row)
+        hdr = {"Account #": "", "Account Name": f"── {acct_type}s ──"}
+        for lbl, _, _ in periods:
+            hdr[f"{lbl} Dr"] = ""
+            hdr[f"{lbl} Cr"] = ""
+        rows.append(hdr)
 
         for acct in accts:
             row = {"Account #": acct["number"], "Account Name": acct["name"]}
-            for label, _, p_end in periods:
-                bal = compute_cumulative_balances_as_of(p_end).get(acct["id"], 0.0)
+            for lbl, _, p_end in periods:
+                bal = compute_cumulative_balances_as_of(p_end, accounts, entries).get(acct["id"], 0.0)
                 if acct["normal"] == "Debit":
                     if bal >= 0:
-                        row[f"{label} Dr"] = fmt_acct(bal)
-                        row[f"{label} Cr"] = ""
-                        period_totals_dr[label] += bal
+                        row[f"{lbl} Dr"] = fmt_acct(bal); row[f"{lbl} Cr"] = ""
+                        totals_dr[lbl] += bal
                     else:
-                        row[f"{label} Dr"] = ""
-                        row[f"{label} Cr"] = fmt_acct(abs(bal))
-                        period_totals_cr[label] += abs(bal)
+                        row[f"{lbl} Dr"] = ""; row[f"{lbl} Cr"] = fmt_acct(abs(bal))
+                        totals_cr[lbl] += abs(bal)
                 else:
                     if bal >= 0:
-                        row[f"{label} Dr"] = ""
-                        row[f"{label} Cr"] = fmt_acct(bal)
-                        period_totals_cr[label] += bal
+                        row[f"{lbl} Dr"] = ""; row[f"{lbl} Cr"] = fmt_acct(bal)
+                        totals_cr[lbl] += bal
                     else:
-                        row[f"{label} Dr"] = fmt_acct(abs(bal))
-                        row[f"{label} Cr"] = ""
-                        period_totals_dr[label] += abs(bal)
+                        row[f"{lbl} Dr"] = fmt_acct(abs(bal)); row[f"{lbl} Cr"] = ""
+                        totals_dr[lbl] += abs(bal)
             rows.append(row)
 
-    # Totals row
     totals_row = {"Account #": "", "Account Name": "TOTALS"}
-    for label, _, _ in periods:
-        totals_row[f"{label} Dr"] = fmt_acct(period_totals_dr[label])
-        totals_row[f"{label} Cr"] = fmt_acct(period_totals_cr[label])
+    for lbl, _, _ in periods:
+        totals_row[f"{lbl} Dr"] = fmt_acct(totals_dr[lbl])
+        totals_row[f"{lbl} Cr"] = fmt_acct(totals_cr[lbl])
     rows.append(totals_row)
-
     return pd.DataFrame(rows)
 
 
-def generate_income_statement(start_dt, end_dt, grouping):
-    """Generate multi-step Income Statement for each period."""
+def generate_income_statement(start_dt, end_dt, grouping, accounts=None, entries=None):
+    """Multi-step Income Statement with activity for each period."""
+    if accounts is None: accounts = get_accounts()
+    if entries  is None: entries  = get_entries()
     periods = get_period_boundaries(start_dt, end_dt, grouping)
-    sorted_accts = sorted(st.session_state.accounts, key=lambda a: a["number"])
+    sorted_accts = sorted(accounts, key=lambda a: a["number"])
     show_total = len(periods) > 1
 
     revenue_accts = [a for a in sorted_accts if a["type"] == "Revenue"]
-    cogs_accts = [a for a in sorted_accts if a["id"] == "x5000"]
-    opex_accts = [a for a in sorted_accts if a["type"] == "Expense" and a["id"] != "x5000"]
+    cogs_accts    = [a for a in sorted_accts if a["number"] == "5000"]
+    opex_accts    = [a for a in sorted_accts if a["type"] == "Expense" and a["number"] != "5000"]
+
+    period_acts = [compute_activity(ps, pe, accounts, entries) for _, ps, pe in periods]
 
     rows = []
 
     def make_row(label, values, bold=False):
-        prefix = "**" if bold else ""
-        suffix = "**" if bold else ""
-        row = {"": f"{prefix}{label}{suffix}"}
-        for i, (plabel, _, _) in enumerate(periods):
-            row[plabel] = fmt_acct(values[i]) if values[i] is not None else ""
+        p = "**" if bold else ""
+        row = {"": f"{p}{label}{p}"}
+        for i, (pl, _, _) in enumerate(periods):
+            row[pl] = fmt_acct(values[i]) if values[i] is not None else ""
         if show_total:
-            total = sum(v for v in values if v is not None)
-            row["Total"] = fmt_acct(total)
+            row["Total"] = fmt_acct(sum(v for v in values if v is not None))
         return row
 
-    def blank_row():
-        row = {"": ""}
-        for plabel, _, _ in periods:
-            row[plabel] = ""
-        if show_total:
-            row["Total"] = ""
-        return row
+    def blank():
+        r = {"": ""}
+        for pl, _, _ in periods: r[pl] = ""
+        if show_total: r["Total"] = ""
+        return r
 
-    # Compute activity for each period
-    period_activities = []
-    for _, p_start, p_end in periods:
-        period_activities.append(compute_activity(p_start, p_end))
-
-    # ── Revenue Section ──
+    # Revenue
     rows.append(make_row("REVENUE", [None] * len(periods)))
-    revenue_totals = [0.0] * len(periods)
+    rev_tot = [0.0] * len(periods)
     for acct in revenue_accts:
-        values = []
-        for i, act in enumerate(period_activities):
-            val = act.get(acct["id"], 0.0)
-            values.append(val)
-            revenue_totals[i] += val
-        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
-    rows.append(make_row("Total Revenue", revenue_totals, bold=True))
-    rows.append(blank_row())
+        vals = [act.get(acct["id"], 0.0) for act in period_acts]
+        for i, v in enumerate(vals): rev_tot[i] += v
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", vals))
+    rows.append(make_row("Total Revenue", rev_tot, bold=True))
+    rows.append(blank())
 
-    # ── COGS Section ──
-    cogs_totals = [0.0] * len(periods)
+    # COGS
+    cogs_tot = [0.0] * len(periods)
     if cogs_accts:
         rows.append(make_row("COST OF GOODS SOLD", [None] * len(periods)))
         for acct in cogs_accts:
-            values = []
-            for i, act in enumerate(period_activities):
-                val = act.get(acct["id"], 0.0)
-                values.append(val)
-                cogs_totals[i] += val
-            rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
-        rows.append(make_row("Total COGS", cogs_totals, bold=True))
-        rows.append(blank_row())
+            vals = [act.get(acct["id"], 0.0) for act in period_acts]
+            for i, v in enumerate(vals): cogs_tot[i] += v
+            rows.append(make_row(f"  {acct['number']} {acct['name']}", vals))
+        rows.append(make_row("Total COGS", cogs_tot, bold=True))
+        rows.append(blank())
 
-    # ── Gross Profit ──
-    gross_profit = [revenue_totals[i] - cogs_totals[i] for i in range(len(periods))]
-    rows.append(make_row("GROSS PROFIT", gross_profit, bold=True))
-    rows.append(blank_row())
+    # Gross Profit
+    gross = [rev_tot[i] - cogs_tot[i] for i in range(len(periods))]
+    rows.append(make_row("GROSS PROFIT", gross, bold=True))
+    rows.append(blank())
 
-    # ── Operating Expenses ──
+    # Operating Expenses
     rows.append(make_row("OPERATING EXPENSES", [None] * len(periods)))
-    opex_totals = [0.0] * len(periods)
+    opex_tot = [0.0] * len(periods)
     for acct in opex_accts:
-        values = []
-        for i, act in enumerate(period_activities):
-            val = act.get(acct["id"], 0.0)
-            values.append(val)
-            opex_totals[i] += val
-        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
-    rows.append(make_row("Total Operating Expenses", opex_totals, bold=True))
-    rows.append(blank_row())
+        vals = [act.get(acct["id"], 0.0) for act in period_acts]
+        for i, v in enumerate(vals): opex_tot[i] += v
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", vals))
+    rows.append(make_row("Total Operating Expenses", opex_tot, bold=True))
+    rows.append(blank())
 
-    # ── Net Income ──
-    net_income = [gross_profit[i] - opex_totals[i] for i in range(len(periods))]
+    net_income = [gross[i] - opex_tot[i] for i in range(len(periods))]
     rows.append(make_row("NET INCOME (LOSS)", net_income, bold=True))
-
     return pd.DataFrame(rows)
 
 
-def generate_balance_sheet(start_dt, end_dt, grouping):
-    """Generate Balance Sheet: cumulative balances as of each period end."""
+def generate_balance_sheet(start_dt, end_dt, grouping, accounts=None, entries=None):
+    """Balance Sheet: cumulative balances as of each period-end date."""
+    if accounts is None: accounts = get_accounts()
+    if entries  is None: entries  = get_entries()
     periods = get_period_boundaries(start_dt, end_dt, grouping)
-    sorted_accts = sorted(st.session_state.accounts, key=lambda a: a["number"])
+    sorted_accts = sorted(accounts, key=lambda a: a["number"])
+    period_bals = [compute_cumulative_balances_as_of(pe, accounts, entries) for _, _, pe in periods]
 
-    asset_accts = [a for a in sorted_accts if a["type"] == "Asset"]
-    liability_accts = [a for a in sorted_accts if a["type"] == "Liability"]
-    equity_accts = [a for a in sorted_accts if a["type"] == "Equity"]
+    asset_accts   = [a for a in sorted_accts if a["type"] == "Asset"]
+    liab_accts    = [a for a in sorted_accts if a["type"] == "Liability"]
+    equity_accts  = [a for a in sorted_accts if a["type"] == "Equity"]
     revenue_accts = [a for a in sorted_accts if a["type"] == "Revenue"]
     expense_accts = [a for a in sorted_accts if a["type"] == "Expense"]
 
-    # Pre-compute cumulative balances for each period end
-    period_balances = []
-    for _, _, p_end in periods:
-        period_balances.append(compute_cumulative_balances_as_of(p_end))
-
     rows = []
 
+    def col(i):
+        return f"As of {periods[i][2].strftime('%m/%d/%Y')}" if len(periods) == 1 else periods[i][0]
+
     def make_row(label, values, bold=False):
-        prefix = "**" if bold else ""
-        suffix = "**" if bold else ""
-        row = {"": f"{prefix}{label}{suffix}"}
-        for i, (plabel, _, _) in enumerate(periods):
-            as_of = periods[i][2].strftime("%m/%d/%Y")
-            col = f"As of {as_of}" if len(periods) == 1 else plabel
-            row[col] = fmt_acct(values[i]) if values[i] is not None else ""
+        p = "**" if bold else ""
+        row = {"": f"{p}{label}{p}"}
+        for i in range(len(periods)):
+            row[col(i)] = fmt_acct(values[i]) if values[i] is not None else ""
         return row
 
-    def blank_row():
-        row = {"": ""}
-        for i, (plabel, _, _) in enumerate(periods):
-            as_of = periods[i][2].strftime("%m/%d/%Y")
-            col = f"As of {as_of}" if len(periods) == 1 else plabel
-            row[col] = ""
-        return row
+    def blank():
+        r = {"": ""}
+        for i in range(len(periods)): r[col(i)] = ""
+        return r
 
-    # ── Assets ──
+    # Assets
     rows.append(make_row("ASSETS", [None] * len(periods)))
-    asset_totals = [0.0] * len(periods)
+    asset_tot = [0.0] * len(periods)
     for acct in asset_accts:
-        values = []
-        for i, bals in enumerate(period_balances):
-            val = bals.get(acct["id"], 0.0)
-            # Accumulated Depreciation is contra-asset, show as negative
-            if acct["normal"] == "Credit":
-                val = -val
-            values.append(val)
-            asset_totals[i] += val
-        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
-    rows.append(make_row("Total Assets", asset_totals, bold=True))
-    rows.append(blank_row())
+        vals = []
+        for i, bals in enumerate(period_bals):
+            v = bals.get(acct["id"], 0.0)
+            if acct["normal"] == "Credit": v = -v   # contra-asset (Accum Depr)
+            vals.append(v); asset_tot[i] += v
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", vals))
+    rows.append(make_row("Total Assets", asset_tot, bold=True))
+    rows.append(blank())
 
-    # ── Liabilities ──
+    # Liabilities
     rows.append(make_row("LIABILITIES", [None] * len(periods)))
-    liability_totals = [0.0] * len(periods)
-    for acct in liability_accts:
-        values = []
-        for i, bals in enumerate(period_balances):
-            val = bals.get(acct["id"], 0.0)
-            values.append(val)
-            liability_totals[i] += val
-        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
-    rows.append(make_row("Total Liabilities", liability_totals, bold=True))
-    rows.append(blank_row())
+    liab_tot = [0.0] * len(periods)
+    for acct in liab_accts:
+        vals = [bals.get(acct["id"], 0.0) for bals in period_bals]
+        for i, v in enumerate(vals): liab_tot[i] += v
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", vals))
+    rows.append(make_row("Total Liabilities", liab_tot, bold=True))
+    rows.append(blank())
 
-    # ── Equity ──
+    # Equity
     rows.append(make_row("EQUITY", [None] * len(periods)))
-    equity_totals = [0.0] * len(periods)
+    eq_tot = [0.0] * len(periods)
     for acct in equity_accts:
-        values = []
-        for i, bals in enumerate(period_balances):
-            val = bals.get(acct["id"], 0.0)
-            if acct["normal"] == "Debit":
-                val = -val  # Dividends reduce equity
-            values.append(val)
-            equity_totals[i] += val
-        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
-
-    # Net Income (cumulative Revenue - Expenses through period end)
-    net_income_values = []
-    for i, bals in enumerate(period_balances):
+        vals = []
+        for i, bals in enumerate(period_bals):
+            v = bals.get(acct["id"], 0.0)
+            if acct["normal"] == "Debit": v = -v   # dividends reduce equity
+            vals.append(v); eq_tot[i] += v
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", vals))
+    # Net income roll-up (cumulative revenue − expenses through period end)
+    ni_vals = []
+    for i, bals in enumerate(period_bals):
         rev = sum(bals.get(a["id"], 0.0) for a in revenue_accts)
         exp = sum(bals.get(a["id"], 0.0) for a in expense_accts)
         ni = rev - exp
-        net_income_values.append(ni)
-        equity_totals[i] += ni
-    rows.append(make_row("  Net Income (Current Period)", net_income_values))
-    rows.append(make_row("Total Equity", equity_totals, bold=True))
-    rows.append(blank_row())
+        ni_vals.append(ni); eq_tot[i] += ni
+    rows.append(make_row("  Net Income (Current Period)", ni_vals))
+    rows.append(make_row("Total Equity", eq_tot, bold=True))
+    rows.append(blank())
 
-    # ── Total L&E ──
-    total_le = [liability_totals[i] + equity_totals[i] for i in range(len(periods))]
+    total_le = [liab_tot[i] + eq_tot[i] for i in range(len(periods))]
     rows.append(make_row("TOTAL LIABILITIES & EQUITY", total_le, bold=True))
-
     return pd.DataFrame(rows)
 
 
-def generate_cash_flow_statement(start_dt, end_dt, grouping):
-    """Generate Statement of Cash Flows using the indirect method."""
+def generate_cash_flow_statement(start_dt, end_dt, grouping, accounts=None, entries=None):
+    """Statement of Cash Flows — indirect method."""
+    if accounts is None: accounts = get_accounts()
+    if entries  is None: entries  = get_entries()
     periods = get_period_boundaries(start_dt, end_dt, grouping)
-    sorted_accts = sorted(st.session_state.accounts, key=lambda a: a["number"])
+    sorted_accts = sorted(accounts, key=lambda a: a["number"])
     show_total = len(periods) > 1
-
-    rows = []
-
-    def make_row(label, values, bold=False):
-        prefix = "**" if bold else ""
-        suffix = "**" if bold else ""
-        row = {"": f"{prefix}{label}{suffix}"}
-        for i, (plabel, _, _) in enumerate(periods):
-            row[plabel] = fmt_acct(values[i]) if values[i] is not None else ""
-        if show_total:
-            total = sum(v for v in values if v is not None)
-            row["Total"] = fmt_acct(total)
-        return row
-
-    def blank_row():
-        row = {"": ""}
-        for plabel, _, _ in periods:
-            row[plabel] = ""
-        if show_total:
-            row["Total"] = ""
-        return row
-
-    # Pre-compute raw activity (debit - credit) for each period
-    period_raw = []
-    for _, p_start, p_end in periods:
-        period_raw.append(compute_raw_activity(p_start, p_end))
-
-    # Pre-compute normal-direction activity for each period
-    period_normal = []
-    for _, p_start, p_end in periods:
-        period_normal.append(compute_activity(p_start, p_end))
 
     revenue_accts = [a for a in sorted_accts if a["type"] == "Revenue"]
     expense_accts = [a for a in sorted_accts if a["type"] == "Expense"]
 
-    # ── Net Income ──
-    net_income = []
-    for i, act in enumerate(period_normal):
-        rev = sum(act.get(a["id"], 0.0) for a in revenue_accts)
-        exp = sum(act.get(a["id"], 0.0) for a in expense_accts)
-        net_income.append(rev - exp)
+    period_act = [compute_activity(ps, pe, accounts, entries) for _, ps, pe in periods]
+    period_raw = [compute_raw_activity(ps, pe, entries) for _, ps, pe in periods]
 
-    # ══ OPERATING ACTIVITIES ══
+    rows = []
+
+    def make_row(label, values, bold=False):
+        p = "**" if bold else ""
+        row = {"": f"{p}{label}{p}"}
+        for i, (pl, _, _) in enumerate(periods):
+            row[pl] = fmt_acct(values[i]) if values[i] is not None else ""
+        if show_total:
+            row["Total"] = fmt_acct(sum(v for v in values if v is not None))
+        return row
+
+    def blank():
+        r = {"": ""}
+        for pl, _, _ in periods: r[pl] = ""
+        if show_total: r["Total"] = ""
+        return r
+
+    net_income = [
+        sum(act.get(a["id"], 0.0) for a in revenue_accts)
+        - sum(act.get(a["id"], 0.0) for a in expense_accts)
+        for act in period_act
+    ]
+
+    # Locate depreciation expense account by number
+    depr_acct_id = next((a["id"] for a in accounts if a["number"] == DEPRECIATION_EXPENSE_NUMBER), None)
+    depr_vals = [act.get(depr_acct_id, 0.0) if depr_acct_id else 0.0 for act in period_act]
+
+    # ── Operating ──
     rows.append(make_row("OPERATING ACTIVITIES", [None] * len(periods)))
     rows.append(make_row("  Net Income", net_income))
-
-    # Adjustments for non-cash items
     rows.append(make_row("  Adjustments for non-cash items:", [None] * len(periods)))
+    if any(abs(v) > 0.005 for v in depr_vals):
+        rows.append(make_row("    Depreciation & Amortization", depr_vals))
 
-    # Depreciation add-back
-    depr_values = []
-    for i, act in enumerate(period_normal):
-        depr_values.append(act.get(DEPRECIATION_EXPENSE_ID, 0.0))
-    if any(abs(v) > 0.005 for v in depr_values):
-        rows.append(make_row("    Depreciation & Amortization", depr_values))
-
-    # Changes in working capital
     rows.append(make_row("  Changes in working capital:", [None] * len(periods)))
-
-    operating_adjustments = [0.0] * len(periods)
-    for v in depr_values:
-        for i in range(len(periods)):
-            pass
-    # Track total depreciation
-    total_depr = list(depr_values)
-
-    # Operating assets (increase = cash outflow = negative)
-    op_asset_ids = set()
+    op_adj = [0.0] * len(periods)
     for acct in sorted_accts:
-        cf_class = classify_for_cashflow(acct)
-        if cf_class == "operating_asset":
-            op_asset_ids.add(acct["id"])
-            values = []
-            for i, raw in enumerate(period_raw):
-                # Raw activity is debit - credit. For assets, increase is debit.
-                # Increase in asset = used cash = negative for cash flow
-                change = -(raw.get(acct["id"], 0.0))
-                values.append(change)
-                operating_adjustments[i] += change
-            if any(abs(v) > 0.005 for v in values):
-                rows.append(make_row(f"    {acct['name']}", values))
+        cf = classify_for_cashflow(acct)
+        if cf in ("operating_asset", "operating_liability"):
+            vals = [-(raw.get(acct["id"], 0.0)) for raw in period_raw]
+            for i, v in enumerate(vals): op_adj[i] += v
+            if any(abs(v) > 0.005 for v in vals):
+                rows.append(make_row(f"    {acct['name']}", vals))
 
-    # Operating liabilities (increase = cash inflow = positive)
-    for acct in sorted_accts:
-        cf_class = classify_for_cashflow(acct)
-        if cf_class == "operating_liability":
-            values = []
-            for i, raw in enumerate(period_raw):
-                # Raw activity is debit - credit. For liabilities, increase is credit (negative raw).
-                # Increase in liability = source of cash = positive
-                change = -(raw.get(acct["id"], 0.0))
-                values.append(change)
-                operating_adjustments[i] += change
-            if any(abs(v) > 0.005 for v in values):
-                rows.append(make_row(f"    {acct['name']}", values))
+    net_ops = [net_income[i] + depr_vals[i] + op_adj[i] for i in range(len(periods))]
+    rows.append(blank())
+    rows.append(make_row("Net Cash from Operating Activities", net_ops, bold=True))
+    rows.append(blank())
 
-    # Accum depreciation change (already handled via depreciation add-back, but
-    # the balance sheet change in accum depr needs to net out if tracked separately)
-    # For indirect method: depr expense add-back covers the non-cash portion.
-    # Accum depr changes that aren't from depr expense (e.g., asset disposal) would
-    # show here, but we'll keep it simple.
-
-    net_cash_operating = [
-        net_income[i] + total_depr[i] + operating_adjustments[i]
-        for i in range(len(periods))
-    ]
-    rows.append(blank_row())
-    rows.append(make_row("Net Cash from Operating Activities", net_cash_operating, bold=True))
-    rows.append(blank_row())
-
-    # ══ INVESTING ACTIVITIES ══
+    # ── Investing ──
     rows.append(make_row("INVESTING ACTIVITIES", [None] * len(periods)))
-    investing_total = [0.0] * len(periods)
+    inv_tot = [0.0] * len(periods)
     for acct in sorted_accts:
-        cf_class = classify_for_cashflow(acct)
-        if cf_class == "investing":
-            values = []
-            for i, raw in enumerate(period_raw):
-                # Increase in PP&E (debit) = cash outflow = negative
-                change = -(raw.get(acct["id"], 0.0))
-                values.append(change)
-                investing_total[i] += change
-            if any(abs(v) > 0.005 for v in values):
-                rows.append(make_row(f"  {acct['name']}", values))
+        if classify_for_cashflow(acct) == "investing":
+            vals = [-(raw.get(acct["id"], 0.0)) for raw in period_raw]
+            for i, v in enumerate(vals): inv_tot[i] += v
+            if any(abs(v) > 0.005 for v in vals):
+                rows.append(make_row(f"  {acct['name']}", vals))
+    rows.append(make_row("Net Cash from Investing Activities", inv_tot, bold=True))
+    rows.append(blank())
 
-    rows.append(make_row("Net Cash from Investing Activities", investing_total, bold=True))
-    rows.append(blank_row())
-
-    # ══ FINANCING ACTIVITIES ══
+    # ── Financing ──
     rows.append(make_row("FINANCING ACTIVITIES", [None] * len(periods)))
-    financing_total = [0.0] * len(periods)
+    fin_tot = [0.0] * len(periods)
     for acct in sorted_accts:
-        cf_class = classify_for_cashflow(acct)
-        if cf_class == "financing":
-            values = []
-            for i, raw in enumerate(period_raw):
-                if acct["normal"] == "Debit":
-                    # Debit-normal equity (e.g., Dividends Paid): increase = outflow
-                    change = -(raw.get(acct["id"], 0.0))
-                else:
-                    # Credit-normal: increase (credit) = inflow
-                    change = -(raw.get(acct["id"], 0.0))
-                values.append(change)
-                financing_total[i] += change
-            if any(abs(v) > 0.005 for v in values):
-                rows.append(make_row(f"  {acct['name']}", values))
+        if classify_for_cashflow(acct) == "financing":
+            vals = [-(raw.get(acct["id"], 0.0)) for raw in period_raw]
+            for i, v in enumerate(vals): fin_tot[i] += v
+            if any(abs(v) > 0.005 for v in vals):
+                rows.append(make_row(f"  {acct['name']}", vals))
+    rows.append(make_row("Net Cash from Financing Activities", fin_tot, bold=True))
+    rows.append(blank())
 
-    rows.append(make_row("Net Cash from Financing Activities", financing_total, bold=True))
-    rows.append(blank_row())
-
-    # ══ SUMMARY ══
-    net_change = [
-        net_cash_operating[i] + investing_total[i] + financing_total[i]
-        for i in range(len(periods))
-    ]
+    # ── Summary ──
+    net_change = [net_ops[i] + inv_tot[i] + fin_tot[i] for i in range(len(periods))]
     rows.append(make_row("NET CHANGE IN CASH", net_change, bold=True))
 
-    # Beginning and ending cash
-    beginning_cash = []
-    ending_cash = []
-    for i, (_, p_start, p_end) in enumerate(periods):
-        # Beginning cash = cumulative cash balance before period start
-        day_before = p_start - timedelta(days=1)
-        beg_bals = compute_cumulative_balances_as_of(day_before)
-        beg = sum(beg_bals.get(cid, 0.0) for cid in CASH_ACCOUNT_IDS)
-        beginning_cash.append(beg)
+    cash_ids = {a["id"] for a in accounts if a["number"] in CASH_ACCOUNT_NUMBERS}
+    beg_cash, end_cash = [], []
+    for _, ps, pe in periods:
+        beg_bals = compute_cumulative_balances_as_of(ps - timedelta(days=1), accounts, entries)
+        beg_cash.append(sum(beg_bals.get(cid, 0.0) for cid in cash_ids))
+        end_bals = compute_cumulative_balances_as_of(pe, accounts, entries)
+        end_cash.append(sum(end_bals.get(cid, 0.0) for cid in cash_ids))
 
-        end_bals = compute_cumulative_balances_as_of(p_end)
-        end = sum(end_bals.get(cid, 0.0) for cid in CASH_ACCOUNT_IDS)
-        ending_cash.append(end)
-
-    rows.append(make_row("Beginning Cash Balance", beginning_cash))
-    rows.append(make_row("ENDING CASH BALANCE", ending_cash, bold=True))
-
+    rows.append(make_row("Beginning Cash Balance", beg_cash))
+    rows.append(make_row("ENDING CASH BALANCE", end_cash, bold=True))
     return pd.DataFrame(rows)
 
+# ── Entry Form Helpers ────────────────────────────────────────────────────────
+def auto_ref():
+    return f"JE-{get_next_id():04d}"
 
-# ── App Header ──────────────────────────────────────────────────────────────
+def open_entry_form(entry=None):
+    st.session_state.show_entry_form = True
+    st.session_state.view_entry_id = None
+    st.session_state.editing_entry_id = entry["id"] if entry else None
+    if entry:
+        st.session_state.form_date = datetime.strptime(entry["date"], "%Y-%m-%d").date()
+        st.session_state.form_ref  = entry["reference"]
+        st.session_state.form_memo = entry["memo"]
+        st.session_state.form_lines = [
+            {
+                "account":     account_label(account_by_id(l["account_id"])),
+                "description": l.get("description", ""),
+                "debit":       l.get("debit", 0.0),
+                "credit":      l.get("credit", 0.0),
+            }
+            for l in entry["lines"]
+        ]
+    else:
+        st.session_state.form_date  = date.today()
+        st.session_state.form_ref   = auto_ref()
+        st.session_state.form_memo  = ""
+        st.session_state.form_lines = [
+            {"account": "", "description": "", "debit": 0.0, "credit": 0.0},
+            {"account": "", "description": "", "debit": 0.0, "credit": 0.0},
+        ]
+
+def close_entry_form():
+    st.session_state.show_entry_form  = False
+    st.session_state.editing_entry_id = None
+    st.session_state.form_lines       = []
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR — Entity Management
+# ══════════════════════════════════════════════════════════════════════════════
+with st.sidebar:
+    st.header("Entities")
+
+    all_entities = sorted(st.session_state.entities.values(), key=lambda e: e["name"])
+    entity_names = [e["name"] for e in all_entities]
+    entity_ids   = [e["id"]   for e in all_entities]
+    cur_idx = entity_ids.index(active_eid()) if active_eid() in entity_ids else 0
+
+    chosen_name = st.selectbox(
+        "Active Entity",
+        options=entity_names,
+        index=cur_idx,
+    )
+    chosen_id = entity_ids[entity_names.index(chosen_name)]
+    if chosen_id != active_eid():
+        set_active_entity(chosen_id)
+        st.rerun()
+
+    ae = get_active_entity()
+    meta_parts = [ae["type"]]
+    if ae.get("description"):
+        meta_parts.append(ae["description"])
+    st.caption(" · ".join(meta_parts))
+    n_je = len(get_entries())
+    st.caption(f"{n_je} journal {'entry' if n_je == 1 else 'entries'}")
+
+    st.divider()
+
+    btn_new, btn_edit = st.columns(2)
+    with btn_new:
+        if st.button("+ New", use_container_width=True, key="sb_new_entity"):
+            st.session_state.show_entity_form  = True
+            st.session_state.editing_entity_id = None
+            st.rerun()
+    with btn_edit:
+        if st.button("✏ Edit", use_container_width=True, key="sb_edit_entity"):
+            st.session_state.show_entity_form  = True
+            st.session_state.editing_entity_id = active_eid()
+            st.rerun()
+
+    if len(st.session_state.entities) > 1:
+        if st.button(
+            f"Delete \"{ae['name']}\"",
+            use_container_width=True,
+            type="secondary",
+            key="sb_del_entity",
+        ):
+            delete_entity(active_eid())
+            st.rerun()
+
+    # ── Inline Entity Form ──
+    if st.session_state.show_entity_form:
+        st.divider()
+        eid_editing  = st.session_state.editing_entity_id
+        existing_ent = st.session_state.entities.get(eid_editing) if eid_editing else None
+
+        st.subheader("Edit Entity" if existing_ent else "New Entity")
+
+        ef_name = st.text_input(
+            "Client / Entity Name",
+            value=existing_ent["name"] if existing_ent else "",
+            key="ef_name",
+        )
+        type_idx = ENTITY_TYPES.index(existing_ent["type"]) if existing_ent and existing_ent["type"] in ENTITY_TYPES else 0
+        ef_type = st.selectbox("Entity Type", ENTITY_TYPES, index=type_idx, key="ef_type")
+        ef_desc = st.text_input(
+            "Description / Account #",
+            value=existing_ent.get("description", "") if existing_ent else "",
+            placeholder="e.g. Schwab #1234-5678",
+            key="ef_desc",
+        )
+
+        ef_c, ef_s = st.columns(2)
+        with ef_c:
+            if st.button("Cancel", use_container_width=True, key="ef_cancel"):
+                st.session_state.show_entity_form  = False
+                st.session_state.editing_entity_id = None
+                st.rerun()
+        with ef_s:
+            if st.button("Save", use_container_width=True, type="primary", key="ef_save"):
+                if not ef_name.strip():
+                    st.error("Name is required.")
+                else:
+                    if existing_ent:
+                        update_entity(eid_editing, ef_name.strip(), ef_type, ef_desc.strip())
+                    else:
+                        new_eid = create_entity(ef_name.strip(), ef_type, ef_desc.strip())
+                        set_active_entity(new_eid)
+                    st.session_state.show_entity_form  = False
+                    st.session_state.editing_entity_id = None
+                    st.rerun()
+
+    # ── Entity Directory ──
+    if len(st.session_state.entities) > 1:
+        st.divider()
+        st.caption("**All Entities**")
+        for ent in all_entities:
+            marker = "▶" if ent["id"] == active_eid() else " "
+            n = len(ent["entries"])
+            st.caption(f"{marker} **{ent['name']}** · {ent['type']} · {n} JEs")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# APP HEADER
+# ══════════════════════════════════════════════════════════════════════════════
+ae = get_active_entity()
 st.title("Account Ledger")
+entity_badge = f"**{ae['name']}** · {ae['type']}"
+if ae.get("description"):
+    entity_badge += f" · {ae['description']}"
+st.caption(f"Active Entity: {entity_badge}")
 
-# ── Tabs ────────────────────────────────────────────────────────────────────
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_journal, tab_ledger, tab_accounts, tab_reports = st.tabs(
     ["Journal Entries", "General Ledger", "Chart of Accounts", "Reports"]
 )
 
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # JOURNAL ENTRIES TAB
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_journal:
     hdr_col, btn_col = st.columns([5, 1])
     with hdr_col:
@@ -758,10 +845,8 @@ with tab_journal:
 
     # ── Entry Form ────────────────────────────────────────────────────
     if st.session_state.show_entry_form:
-        editing = st.session_state.editing_entry_id is not None
-        form_title = (
-            f"Edit Entry — {st.session_state.form_ref}" if editing else "New Journal Entry"
-        )
+        editing    = st.session_state.editing_entry_id is not None
+        form_title = f"Edit Entry — {st.session_state.form_ref}" if editing else "New Journal Entry"
 
         with st.container(border=True):
             st.subheader(form_title)
@@ -774,44 +859,33 @@ with tab_journal:
             with col_memo:
                 form_memo = st.text_input("Memo / Description", value=st.session_state.form_memo)
 
-            st.markdown("**Line Items** — use the table below to add/edit lines. You can add rows with the ＋ at the bottom or delete rows with the trash icon.")
+            st.markdown("**Line Items** — add rows with ＋ at the bottom; delete rows with the trash icon.")
 
-            account_options = get_account_options()
+            acct_options = get_account_options()
             lines_df = pd.DataFrame(
                 st.session_state.form_lines,
                 columns=["account", "description", "debit", "credit"],
             )
-
             edited_df = st.data_editor(
                 lines_df,
                 column_config={
-                    "account": st.column_config.SelectboxColumn(
-                        "GL Account",
-                        options=account_options,
-                        width="large",
-                    ),
+                    "account":     st.column_config.SelectboxColumn("GL Account", options=acct_options, width="large"),
                     "description": st.column_config.TextColumn("Description", width="medium"),
-                    "debit": st.column_config.NumberColumn(
-                        "Debit", min_value=0.0, format="%.2f", width="small"
-                    ),
-                    "credit": st.column_config.NumberColumn(
-                        "Credit", min_value=0.0, format="%.2f", width="small"
-                    ),
+                    "debit":       st.column_config.NumberColumn("Debit",  min_value=0.0, format="%.2f", width="small"),
+                    "credit":      st.column_config.NumberColumn("Credit", min_value=0.0, format="%.2f", width="small"),
                 },
                 num_rows="dynamic",
                 hide_index=True,
                 use_container_width=True,
             )
 
-            total_debit = float(edited_df["debit"].fillna(0).sum())
+            total_debit  = float(edited_df["debit"].fillna(0).sum())
             total_credit = float(edited_df["credit"].fillna(0).sum())
             diff = abs(total_debit - total_credit)
 
-            tot_col, bal_col = st.columns([2, 2])
+            tot_col, bal_col = st.columns(2)
             with tot_col:
-                st.markdown(
-                    f"**Total Debits:** {fmt(total_debit)} &nbsp;|&nbsp; **Total Credits:** {fmt(total_credit)}"
-                )
+                st.markdown(f"**Total Debits:** {fmt(total_debit)} &nbsp;|&nbsp; **Total Credits:** {fmt(total_credit)}")
             with bal_col:
                 if diff < 0.005:
                     st.success("Entry is balanced ✓")
@@ -820,27 +894,21 @@ with tab_journal:
 
             cancel_col, _, save_col = st.columns([1, 4, 1])
             with cancel_col:
-                if st.button("Cancel", use_container_width=True):
+                if st.button("Cancel", use_container_width=True, key="je_cancel"):
                     close_entry_form()
                     st.rerun()
             with save_col:
-                if st.button("Post Entry", type="primary", use_container_width=True):
+                if st.button("Post Entry", type="primary", use_container_width=True, key="je_post"):
                     errors = []
                     if not form_ref.strip():
                         errors.append("Please enter a reference number.")
-
-                    valid_lines = edited_df[
-                        edited_df["account"].notna() & (edited_df["account"] != "")
-                    ]
+                    valid_lines = edited_df[edited_df["account"].notna() & (edited_df["account"] != "")]
                     if len(valid_lines) < 2:
                         errors.append("A journal entry must have at least 2 lines with accounts selected.")
-
                     if diff >= 0.005:
-                        errors.append(
-                            f"Entry is out of balance by {fmt(diff)}. Debits must equal credits."
-                        )
+                        errors.append(f"Entry is out of balance by {fmt(diff)}. Debits must equal credits.")
                     if total_debit == 0:
-                        errors.append("Entry has no amounts. Please enter debit or credit values.")
+                        errors.append("Entry has no amounts.")
 
                     if errors:
                         for err in errors:
@@ -851,193 +919,156 @@ with tab_journal:
                             acct = label_to_account(row["account"])
                             if acct:
                                 lines_internal.append({
-                                    "account_id": acct["id"],
+                                    "account_id":  acct["id"],
                                     "description": str(row.get("description") or ""),
-                                    "debit": float(row.get("debit") or 0),
-                                    "credit": float(row.get("credit") or 0),
+                                    "debit":       float(row.get("debit")  or 0),
+                                    "credit":      float(row.get("credit") or 0),
                                 })
 
                         if st.session_state.editing_entry_id is not None:
                             idx = next(
-                                (i for i, e in enumerate(st.session_state.entries)
+                                (i for i, e in enumerate(get_entries())
                                  if e["id"] == st.session_state.editing_entry_id),
                                 None,
                             )
                             if idx is not None:
-                                st.session_state.entries[idx] = {
-                                    **st.session_state.entries[idx],
-                                    "date": form_date.strftime("%Y-%m-%d"),
+                                get_entries()[idx] = {
+                                    **get_entries()[idx],
+                                    "date":      form_date.strftime("%Y-%m-%d"),
                                     "reference": form_ref.strip(),
-                                    "memo": form_memo.strip(),
-                                    "lines": lines_internal,
+                                    "memo":      form_memo.strip(),
+                                    "lines":     lines_internal,
                                 }
                         else:
-                            st.session_state.entries.append({
-                                "id": st.session_state.next_entry_id,
-                                "date": form_date.strftime("%Y-%m-%d"),
+                            get_entries().append({
+                                "id":        get_next_id(),
+                                "date":      form_date.strftime("%Y-%m-%d"),
                                 "reference": form_ref.strip(),
-                                "memo": form_memo.strip(),
-                                "lines": lines_internal,
+                                "memo":      form_memo.strip(),
+                                "lines":     lines_internal,
                             })
-                            st.session_state.next_entry_id += 1
+                            increment_next_id()
 
                         close_entry_form()
                         st.rerun()
 
     # ── Entry Detail View ─────────────────────────────────────────────
     if st.session_state.view_entry_id is not None:
-        entry = next(
-            (e for e in st.session_state.entries if e["id"] == st.session_state.view_entry_id),
-            None,
-        )
+        entry = next((e for e in get_entries() if e["id"] == st.session_state.view_entry_id), None)
         if entry:
             with st.container(border=True):
-                title_col, close_col = st.columns([5, 1])
-                with title_col:
+                tc, cc = st.columns([5, 1])
+                with tc:
                     st.subheader(f"Journal Entry — {entry['reference']}")
-                with close_col:
-                    if st.button("Close", use_container_width=True):
+                with cc:
+                    if st.button("Close", use_container_width=True, key="je_close_modal"):
                         st.session_state.view_entry_id = None
                         st.rerun()
 
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Date", entry["date"])
+                m1.metric("Date",      entry["date"])
                 m2.metric("Reference", entry["reference"])
-                m3.metric("Memo", entry["memo"] or "—")
-                m4.metric("Total", fmt(sum(l.get("debit", 0) for l in entry["lines"])))
+                m3.metric("Memo",      entry["memo"] or "—")
+                m4.metric("Total",     fmt(sum(l.get("debit", 0) for l in entry["lines"])))
 
                 detail_rows = []
                 for i, line in enumerate(entry["lines"]):
                     acct = account_by_id(line["account_id"])
                     detail_rows.append({
-                        "#": i + 1,
-                        "Account": account_label(acct) if acct else "Unknown",
+                        "#":           i + 1,
+                        "Account":     account_label(acct) if acct else "Unknown",
                         "Description": line.get("description", ""),
-                        "Debit": fmt(line["debit"]) if line.get("debit", 0) > 0 else "",
-                        "Credit": fmt(line["credit"]) if line.get("credit", 0) > 0 else "",
+                        "Debit":       fmt(line["debit"])  if line.get("debit",  0) > 0 else "",
+                        "Credit":      fmt(line["credit"]) if line.get("credit", 0) > 0 else "",
                     })
-
-                total_d = sum(l.get("debit", 0) for l in entry["lines"])
+                total_d = sum(l.get("debit",  0) for l in entry["lines"])
                 total_c = sum(l.get("credit", 0) for l in entry["lines"])
-                detail_rows.append({
-                    "#": "",
-                    "Account": "**Totals**",
-                    "Description": "",
-                    "Debit": fmt(total_d),
-                    "Credit": fmt(total_c),
-                })
-
-                st.dataframe(
-                    pd.DataFrame(detail_rows),
-                    hide_index=True,
-                    use_container_width=True,
-                )
+                detail_rows.append({"#": "", "Account": "**Totals**", "Description": "",
+                                     "Debit": fmt(total_d), "Credit": fmt(total_c)})
+                st.dataframe(pd.DataFrame(detail_rows), hide_index=True, use_container_width=True)
 
     # ── Entries List ──────────────────────────────────────────────────
-    if not st.session_state.entries:
+    if not get_entries():
         st.info("No journal entries yet. Click **+ New Entry** to get started.")
     else:
-        sorted_entries = sorted(
-            st.session_state.entries, key=lambda e: (e["date"], e["id"])
-        )
+        sorted_entries = sorted(get_entries(), key=lambda e: (e["date"], e["id"]))
 
-        # Header
         h1, h2, h3, h4, h5, h6 = st.columns([1.2, 1.2, 3, 1.2, 1.2, 2])
-        h1.markdown("**Date**")
-        h2.markdown("**Reference**")
-        h3.markdown("**Memo**")
-        h4.markdown("**Debits**")
-        h5.markdown("**Credits**")
-        h6.markdown("**Actions**")
+        h1.markdown("**Date**"); h2.markdown("**Reference**"); h3.markdown("**Memo**")
+        h4.markdown("**Debits**"); h5.markdown("**Credits**"); h6.markdown("**Actions**")
         st.divider()
 
         for entry in sorted_entries:
-            total_d = sum(l.get("debit", 0) for l in entry["lines"])
+            total_d = sum(l.get("debit",  0) for l in entry["lines"])
             total_c = sum(l.get("credit", 0) for l in entry["lines"])
-
             c1, c2, c3, c4, c5, c6 = st.columns([1.2, 1.2, 3, 1.2, 1.2, 2])
             c1.write(entry["date"])
             c2.code(entry["reference"])
             c3.write(entry["memo"])
             c4.write(fmt(total_d))
             c5.write(fmt(total_c))
-
             with c6:
                 a1, a2, a3 = st.columns(3)
                 with a1:
                     if st.button("View", key=f"view_{entry['id']}"):
-                        st.session_state.view_entry_id = entry["id"]
+                        st.session_state.view_entry_id  = entry["id"]
                         st.session_state.show_entry_form = False
                         st.rerun()
                 with a2:
                     if st.button("Edit", key=f"edit_{entry['id']}"):
-                        e = next((x for x in st.session_state.entries if x["id"] == entry["id"]), None)
+                        e = next((x for x in get_entries() if x["id"] == entry["id"]), None)
                         if e:
                             open_entry_form(e)
                             st.rerun()
                 with a3:
                     if st.button("Del", key=f"del_{entry['id']}"):
-                        st.session_state.entries = [
-                            x for x in st.session_state.entries if x["id"] != entry["id"]
+                        st.session_state.entities[active_eid()]["entries"] = [
+                            x for x in get_entries() if x["id"] != entry["id"]
                         ]
                         if st.session_state.view_entry_id == entry["id"]:
                             st.session_state.view_entry_id = None
                         st.rerun()
 
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # GENERAL LEDGER TAB
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_ledger:
     st.subheader("General Ledger")
 
-    # Account filter
-    account_options_all = ["— All Accounts —"] + get_account_options()
-    filter_label = st.selectbox("Filter by Account", options=account_options_all)
-    filter_acct = label_to_account(filter_label) if filter_label != "— All Accounts —" else None
+    acct_options_all = ["— All Accounts —"] + get_account_options()
+    filter_label = st.selectbox("Filter by Account", options=acct_options_all)
+    filter_acct  = label_to_account(filter_label) if filter_label != "— All Accounts —" else None
 
-    if not st.session_state.entries:
+    if not get_entries():
         st.info("Post journal entries to see ledger activity.")
     else:
-        sorted_entries = sorted(
-            st.session_state.entries, key=lambda e: (e["date"], e["id"])
-        )
-
+        sorted_entries = sorted(get_entries(), key=lambda e: (e["date"], e["id"]))
         all_lines = []
         for entry in sorted_entries:
             for line in entry["lines"]:
                 if filter_acct and line["account_id"] != filter_acct["id"]:
                     continue
-                all_lines.append({
-                    **line,
-                    "date": entry["date"],
-                    "reference": entry["reference"],
-                    "entry_memo": entry["memo"],
-                })
+                all_lines.append({**line, "date": entry["date"],
+                                   "reference": entry["reference"],
+                                   "entry_memo": entry["memo"]})
 
         if not all_lines:
             st.info("No transactions for the selected account.")
         else:
             rows = []
-            running_balance = 0.0
-            current_account_id = None
+            running_balance  = 0.0
+            current_acct_id  = None
 
             for line in all_lines:
-                acct = account_by_id(line["account_id"])
-                acct_label = account_label(acct) if acct else "Unknown"
+                acct      = account_by_id(line["account_id"])
+                acct_lbl  = account_label(acct) if acct else "Unknown"
 
-                # Insert account group header when viewing all accounts
-                if not filter_acct and line["account_id"] != current_account_id:
-                    current_account_id = line["account_id"]
-                    running_balance = 0.0
-                    rows.append({
-                        "Date": "",
-                        "Reference": "",
-                        "Account": f"── {acct_label} ──",
-                        "Memo": "",
-                        "Debit": "",
-                        "Credit": "",
-                        "Balance": "",
-                    })
+                if not filter_acct and line["account_id"] != current_acct_id:
+                    current_acct_id  = line["account_id"]
+                    running_balance  = 0.0
+                    rows.append({"Date": "", "Reference": "",
+                                 "Account": f"── {acct_lbl} ──",
+                                 "Memo": "", "Debit": "", "Credit": "", "Balance": ""})
 
                 if acct:
                     if acct["normal"] == "Debit":
@@ -1050,20 +1081,20 @@ with tab_ledger:
                     bal_str += " Cr"
 
                 rows.append({
-                    "Date": line["date"],
+                    "Date":      line["date"],
                     "Reference": line["reference"],
-                    "Account": acct_label if filter_acct else "",
-                    "Memo": line.get("description") or line.get("entry_memo", ""),
-                    "Debit": fmt(line["debit"]) if line.get("debit", 0) > 0 else "",
-                    "Credit": fmt(line["credit"]) if line.get("credit", 0) > 0 else "",
-                    "Balance": bal_str,
+                    "Account":   acct_lbl if filter_acct else "",
+                    "Memo":      line.get("description") or line.get("entry_memo", ""),
+                    "Debit":     fmt(line["debit"])  if line.get("debit",  0) > 0 else "",
+                    "Credit":    fmt(line["credit"]) if line.get("credit", 0) > 0 else "",
+                    "Balance":   bal_str,
                 })
 
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # CHART OF ACCOUNTS TAB
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_accounts:
     hdr_col, btn_col = st.columns([5, 1])
     with hdr_col:
@@ -1073,96 +1104,104 @@ with tab_accounts:
             st.session_state.show_account_form = not st.session_state.show_account_form
             st.rerun()
 
-    # ── Add Account Form ──────────────────────────────────────────────
     if st.session_state.show_account_form:
         with st.container(border=True):
             st.subheader("New GL Account")
-
             fc1, fc2, fc3, fc4 = st.columns([1, 2, 1, 1])
             with fc1:
                 new_number = st.text_input("Account #", placeholder="e.g. 1050")
             with fc2:
                 new_name = st.text_input("Account Name", placeholder="e.g. Petty Cash")
             with fc3:
-                new_type = st.selectbox(
-                    "Type", ["Asset", "Liability", "Equity", "Revenue", "Expense"]
-                )
+                new_type = st.selectbox("Type", ["Asset", "Liability", "Equity", "Revenue", "Expense"])
             with fc4:
                 default_normal = "Debit" if new_type in ("Asset", "Expense") else "Credit"
-                new_normal = st.selectbox(
-                    "Normal Balance",
-                    ["Debit", "Credit"],
-                    index=0 if default_normal == "Debit" else 1,
-                )
-
-            fa_cancel, _, fa_save = st.columns([1, 4, 1])
-            with fa_cancel:
+                new_normal = st.selectbox("Normal Balance", ["Debit", "Credit"],
+                                          index=0 if default_normal == "Debit" else 1)
+            fa_c, _, fa_s = st.columns([1, 4, 1])
+            with fa_c:
                 if st.button("Cancel", key="cancel_acct", use_container_width=True):
                     st.session_state.show_account_form = False
                     st.rerun()
-            with fa_save:
+            with fa_s:
                 if st.button("Save Account", type="primary", key="save_acct", use_container_width=True):
                     errors = []
-                    if not new_number.strip():
-                        errors.append("Please enter an account number.")
-                    if not new_name.strip():
-                        errors.append("Please enter an account name.")
-                    if any(a["number"] == new_number.strip() for a in st.session_state.accounts):
+                    if not new_number.strip(): errors.append("Please enter an account number.")
+                    if not new_name.strip():   errors.append("Please enter an account name.")
+                    if any(a["number"] == new_number.strip() for a in get_accounts()):
                         errors.append(f"Account number {new_number.strip()} already exists.")
-
                     if errors:
-                        for err in errors:
-                            st.error(err)
+                        for err in errors: st.error(err)
                     else:
-                        st.session_state.accounts.append({
-                            "id": f"custom_{int(datetime.now().timestamp() * 1000)}",
+                        get_accounts().append({
+                            "id":     f"custom_{int(datetime.now().timestamp() * 1000)}",
                             "number": new_number.strip(),
-                            "name": new_name.strip(),
-                            "type": new_type,
+                            "name":   new_name.strip(),
+                            "type":   new_type,
                             "normal": new_normal,
                         })
-                        st.session_state.accounts.sort(key=lambda a: a["number"])
+                        get_accounts().sort(key=lambda a: a["number"])
                         st.session_state.show_account_form = False
                         st.rerun()
 
-    # ── Accounts Table ────────────────────────────────────────────────
-    balances = compute_balances()
+    balances   = compute_balances()
     type_order = ["Asset", "Liability", "Equity", "Revenue", "Expense"]
-
-    grouped = {}
-    for acct in sorted(st.session_state.accounts, key=lambda a: a["number"]):
+    grouped    = {}
+    for acct in sorted(get_accounts(), key=lambda a: a["number"]):
         grouped.setdefault(acct["type"], []).append(acct)
 
     rows = []
     for acct_type in type_order:
         if acct_type not in grouped or not grouped[acct_type]:
             continue
-        rows.append({
-            "Account #": f"── {acct_type}s ──",
-            "Account Name": "",
-            "Type": "",
-            "Normal Balance": "",
-            "Balance": "",
-        })
+        rows.append({"Account #": f"── {acct_type}s ──", "Account Name": "",
+                     "Type": "", "Normal Balance": "", "Balance": ""})
         for acct in grouped[acct_type]:
             bal = balances.get(acct["id"], 0.0)
             rows.append({
-                "Account #": acct["number"],
-                "Account Name": acct["name"],
-                "Type": acct["type"],
+                "Account #":      acct["number"],
+                "Account Name":   acct["name"],
+                "Type":           acct["type"],
                 "Normal Balance": acct["normal"],
-                "Balance": fmt(abs(bal)),
+                "Balance":        fmt(abs(bal)),
             })
-
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # REPORTS TAB
-# ══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 with tab_reports:
     st.subheader("Financial Reports")
 
-    # ── Report Controls ──────────────────────────────────────────────
+    # ── Entity Selection ──────────────────────────────────────────────
+    all_ent_list  = sorted(st.session_state.entities.values(), key=lambda e: e["name"])
+    all_ent_names = [e["name"] for e in all_ent_list]
+    all_ent_ids   = [e["id"]   for e in all_ent_list]
+
+    # Default to the active entity
+    active_name = get_active_entity()["name"]
+    default_sel = [active_name] if active_name in all_ent_names else [all_ent_names[0]]
+
+    selected_names = st.multiselect(
+        "Entities to include in this report",
+        options=all_ent_names,
+        default=default_sel,
+        help=(
+            "Select one entity for a standard report. "
+            "Select multiple to generate a consolidated report where accounts "
+            "with the same number are combined across entities."
+        ),
+    )
+    selected_ids = [all_ent_ids[all_ent_names.index(n)] for n in selected_names]
+
+    is_consolidated = len(selected_ids) > 1
+    if is_consolidated:
+        st.info(
+            f"**Consolidated** across {len(selected_ids)} entities: "
+            + ", ".join(f"*{n}*" for n in selected_names)
+        )
+
+    # ── Report Controls ───────────────────────────────────────────────
     ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([2, 1.5, 1.5, 1.5])
     with ctrl1:
         report_type = st.selectbox(
@@ -1170,52 +1209,73 @@ with tab_reports:
             ["Income Statement", "Balance Sheet", "Trial Balance", "Statement of Cash Flows"],
         )
     with ctrl2:
-        # Determine sensible date defaults from existing entries
-        if st.session_state.entries:
-            all_dates = [e["date"] for e in st.session_state.entries]
-            min_date = datetime.strptime(min(all_dates), "%Y-%m-%d").date()
-            max_date = datetime.strptime(max(all_dates), "%Y-%m-%d").date()
-            default_start = min_date.replace(month=1, day=1)
-            default_end = max_date.replace(month=12, day=31)
+        if selected_ids:
+            all_dates = [
+                e["date"]
+                for eid in selected_ids
+                for e in st.session_state.entities[eid]["entries"]
+            ]
+            if all_dates:
+                default_start = datetime.strptime(min(all_dates), "%Y-%m-%d").date().replace(month=1, day=1)
+                default_end   = datetime.strptime(max(all_dates), "%Y-%m-%d").date().replace(month=12, day=31)
+            else:
+                default_start = date.today().replace(month=1, day=1)
+                default_end   = date.today().replace(month=12, day=31)
         else:
             default_start = date.today().replace(month=1, day=1)
-            default_end = date.today().replace(month=12, day=31)
-
+            default_end   = date.today().replace(month=12, day=31)
         report_start = st.date_input("From", value=default_start, key="rpt_start")
     with ctrl3:
         report_end = st.date_input("To", value=default_end, key="rpt_end")
     with ctrl4:
         grouping = st.selectbox("Group By", ["None", "Monthly", "Quarterly", "Yearly"])
 
-    if report_start > report_end:
+    # ── Generate ──────────────────────────────────────────────────────
+    if not selected_ids:
+        st.warning("Select at least one entity above.")
+    elif report_start > report_end:
         st.error("Start date must be on or before end date.")
-    elif not st.session_state.entries:
-        st.info("Post journal entries to generate reports.")
+    elif not any(st.session_state.entities[eid]["entries"] for eid in selected_ids):
+        st.info("No journal entries found for the selected entities.")
     else:
-        # ── Generate Report ──────────────────────────────────────────
-        with st.spinner("Generating report..."):
-            if report_type == "Trial Balance":
-                report_df = generate_trial_balance(report_start, report_end, grouping)
-            elif report_type == "Income Statement":
-                report_df = generate_income_statement(report_start, report_end, grouping)
+        # Build data context (single-entity or consolidated)
+        if is_consolidated:
+            rpt_accounts, rpt_entries = build_report_context(selected_ids)
+        else:
+            rpt_accounts = get_accounts(selected_ids[0])
+            rpt_entries  = get_entries(selected_ids[0])
+
+        with st.spinner("Generating report…"):
+            if report_type == "Income Statement":
+                report_df = generate_income_statement(report_start, report_end, grouping, rpt_accounts, rpt_entries)
             elif report_type == "Balance Sheet":
-                report_df = generate_balance_sheet(report_start, report_end, grouping)
+                report_df = generate_balance_sheet(report_start, report_end, grouping, rpt_accounts, rpt_entries)
+            elif report_type == "Trial Balance":
+                report_df = generate_trial_balance(report_start, report_end, grouping, rpt_accounts, rpt_entries)
             elif report_type == "Statement of Cash Flows":
-                report_df = generate_cash_flow_statement(report_start, report_end, grouping)
+                report_df = generate_cash_flow_statement(report_start, report_end, grouping, rpt_accounts, rpt_entries)
             else:
                 report_df = pd.DataFrame()
 
         if report_df.empty:
-            st.info("No data for the selected report and date range.")
+            st.info("No data for the selected parameters.")
         else:
-            # ── Report Header ────────────────────────────────────────
+            # Report header
+            entity_label = (
+                f"CONSOLIDATED — {', '.join(selected_names)}"
+                if is_consolidated
+                else selected_names[0]
+            )
             if report_type in ("Income Statement", "Trial Balance", "Statement of Cash Flows"):
-                period_desc = f"For the Period {report_start.strftime('%B %d, %Y')} through {report_end.strftime('%B %d, %Y')}"
+                period_desc = (
+                    f"{entity_label} — "
+                    f"For the Period {report_start.strftime('%B %d, %Y')} "
+                    f"through {report_end.strftime('%B %d, %Y')}"
+                )
             else:
-                period_desc = f"As of {report_end.strftime('%B %d, %Y')}"
+                period_desc = f"{entity_label} — As of {report_end.strftime('%B %d, %Y')}"
             st.caption(period_desc)
 
-            # ── Display Report ───────────────────────────────────────
             st.dataframe(
                 report_df,
                 hide_index=True,
@@ -1223,21 +1283,18 @@ with tab_reports:
                 height=min(len(report_df) * 38 + 40, 800),
             )
 
-            # ── CSV Export ───────────────────────────────────────────
+            # CSV export (strip markdown bold markers)
             csv_df = report_df.copy()
             for col in csv_df.columns:
                 csv_df[col] = csv_df[col].astype(str).str.replace(r"\*\*", "", regex=True)
-            csv_data = csv_df.to_csv(index=False)
-
-            file_name = (
-                report_type.lower().replace(" ", "_")
-                + f"_{report_start.strftime('%Y%m%d')}_{report_end.strftime('%Y%m%d')}.csv"
-            )
 
             st.download_button(
                 label="Export to CSV",
-                data=csv_data,
-                file_name=file_name,
+                data=csv_df.to_csv(index=False),
+                file_name=(
+                    report_type.lower().replace(" ", "_")
+                    + f"_{report_start.strftime('%Y%m%d')}_{report_end.strftime('%Y%m%d')}.csv"
+                ),
                 mime="text/csv",
                 type="secondary",
             )
