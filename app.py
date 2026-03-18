@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from calendar import monthrange
 
 st.set_page_config(page_title="Account Ledger", layout="wide")
 
@@ -139,11 +140,609 @@ def close_entry_form():
     st.session_state.editing_entry_id = None
     st.session_state.form_lines = []
 
+# ── Report Formatting ───────────────────────────────────────────────────────
+def fmt_acct(n):
+    """CPA-style: negatives in parentheses, zero as dash."""
+    if n is None:
+        return ""
+    n = float(n)
+    if abs(n) < 0.005:
+        return "—"
+    if n < 0:
+        return f"({abs(n):,.2f})"
+    return f"{n:,.2f}"
+
+# ── Cash Flow Account Classification ───────────────────────────────────────
+CASH_ACCOUNT_IDS = {"a1000", "a1010"}
+OPERATING_WC_ASSETS = {"a1200", "a1300", "a1400"}
+OPERATING_WC_LIABILITIES = {"l2000", "l2100", "l2300", "l2400"}
+DEPRECIATION_EXPENSE_ID = "x5400"
+ACCUM_DEPRECIATION_ID = "a1600"
+INVESTING_ACCOUNT_IDS = {"a1500"}
+FINANCING_ACCOUNT_IDS = {"l2200", "e3000", "e3100", "e3300"}
+
+def classify_for_cashflow(acct):
+    """Classify an account for cash flow statement purposes."""
+    aid = acct["id"]
+    if aid in CASH_ACCOUNT_IDS:
+        return "cash"
+    if aid == DEPRECIATION_EXPENSE_ID:
+        return "depr_expense"
+    if aid == ACCUM_DEPRECIATION_ID:
+        return "accum_depr"
+    if acct["type"] in ("Revenue", "Expense"):
+        return "net_income"
+    if aid in OPERATING_WC_ASSETS:
+        return "operating_asset"
+    if aid in OPERATING_WC_LIABILITIES:
+        return "operating_liability"
+    if aid in INVESTING_ACCOUNT_IDS:
+        return "investing"
+    if aid in FINANCING_ACCOUNT_IDS:
+        return "financing"
+    # Custom accounts: classify by type
+    if acct["type"] == "Asset":
+        return "investing"
+    if acct["type"] == "Liability":
+        return "operating_liability"
+    if acct["type"] == "Equity":
+        return "financing"
+    return "operating_liability"
+
+# ── Period Boundary Computation ─────────────────────────────────────────────
+def get_period_boundaries(start_dt, end_dt, grouping):
+    """Return list of (label, period_start, period_end) tuples."""
+    if grouping == "None":
+        label = f"{start_dt.strftime('%b %d, %Y')} – {end_dt.strftime('%b %d, %Y')}"
+        return [(label, start_dt, end_dt)]
+
+    periods = []
+    if grouping == "Monthly":
+        cursor = start_dt.replace(day=1)
+        while cursor <= end_dt:
+            _, last_day = monthrange(cursor.year, cursor.month)
+            p_end = cursor.replace(day=last_day)
+            p_start = max(cursor, start_dt)
+            p_end = min(p_end, end_dt)
+            label = cursor.strftime("%b %Y")
+            periods.append((label, p_start, p_end))
+            # Advance to next month
+            if cursor.month == 12:
+                cursor = cursor.replace(year=cursor.year + 1, month=1, day=1)
+            else:
+                cursor = cursor.replace(month=cursor.month + 1, day=1)
+    elif grouping == "Quarterly":
+        # Find start of quarter containing start_dt
+        q_month = ((start_dt.month - 1) // 3) * 3 + 1
+        cursor = start_dt.replace(month=q_month, day=1)
+        while cursor <= end_dt:
+            q_end_month = cursor.month + 2
+            q_end_year = cursor.year
+            if q_end_month > 12:
+                q_end_month -= 12
+                q_end_year += 1
+            _, last_day = monthrange(q_end_year, q_end_month)
+            p_end = date(q_end_year, q_end_month, last_day)
+            p_start = max(cursor, start_dt)
+            p_end_clamped = min(p_end, end_dt)
+            q_num = (cursor.month - 1) // 3 + 1
+            label = f"Q{q_num} {cursor.year}"
+            periods.append((label, p_start, p_end_clamped))
+            # Advance to next quarter
+            next_month = cursor.month + 3
+            next_year = cursor.year
+            if next_month > 12:
+                next_month -= 12
+                next_year += 1
+            cursor = date(next_year, next_month, 1)
+    elif grouping == "Yearly":
+        cursor = start_dt.replace(month=1, day=1)
+        while cursor <= end_dt:
+            p_end = cursor.replace(month=12, day=31)
+            p_start = max(cursor, start_dt)
+            p_end_clamped = min(p_end, end_dt)
+            label = str(cursor.year)
+            periods.append((label, p_start, p_end_clamped))
+            cursor = cursor.replace(year=cursor.year + 1)
+
+    return periods
+
+# ── Entry Filtering & Activity Computation ──────────────────────────────────
+def entries_in_range(start_dt, end_dt):
+    """Return entries whose date falls within [start_dt, end_dt]."""
+    s = start_dt.strftime("%Y-%m-%d")
+    e = end_dt.strftime("%Y-%m-%d")
+    return [
+        entry for entry in st.session_state.entries
+        if s <= entry["date"] <= e
+    ]
+
+def compute_activity(start_dt, end_dt):
+    """
+    Compute net activity per account for entries in [start_dt, end_dt].
+    Returns dict: account_id -> activity in normal-balance direction.
+    Positive = balance increased in normal direction.
+    """
+    activity = {}
+    for entry in entries_in_range(start_dt, end_dt):
+        for line in entry["lines"]:
+            aid = line["account_id"]
+            acct = account_by_id(aid)
+            if not acct:
+                continue
+            dr = line.get("debit", 0.0)
+            cr = line.get("credit", 0.0)
+            if acct["normal"] == "Debit":
+                delta = dr - cr
+            else:
+                delta = cr - dr
+            activity[aid] = activity.get(aid, 0.0) + delta
+    return activity
+
+def compute_cumulative_balances_as_of(as_of_date):
+    """Compute cumulative balances for all accounts through as_of_date."""
+    d = as_of_date.strftime("%Y-%m-%d")
+    balances = {a["id"]: 0.0 for a in st.session_state.accounts}
+    for entry in st.session_state.entries:
+        if entry["date"] > d:
+            continue
+        for line in entry["lines"]:
+            acct = account_by_id(line["account_id"])
+            if not acct:
+                continue
+            dr = line.get("debit", 0.0)
+            cr = line.get("credit", 0.0)
+            if acct["normal"] == "Debit":
+                balances[line["account_id"]] += dr - cr
+            else:
+                balances[line["account_id"]] += cr - dr
+    return balances
+
+def compute_raw_activity(start_dt, end_dt):
+    """
+    Compute raw debit-minus-credit per account (not normal-adjusted).
+    Positive = net debit, Negative = net credit.
+    """
+    activity = {}
+    for entry in entries_in_range(start_dt, end_dt):
+        for line in entry["lines"]:
+            aid = line["account_id"]
+            dr = line.get("debit", 0.0)
+            cr = line.get("credit", 0.0)
+            activity[aid] = activity.get(aid, 0.0) + (dr - cr)
+    return activity
+
+# ── Report Generators ───────────────────────────────────────────────────────
+
+def generate_trial_balance(start_dt, end_dt, grouping):
+    """Generate Trial Balance: cumulative balances as of each period end."""
+    periods = get_period_boundaries(start_dt, end_dt, grouping)
+    type_order = ["Asset", "Liability", "Equity", "Revenue", "Expense"]
+    sorted_accts = sorted(st.session_state.accounts, key=lambda a: a["number"])
+
+    rows = []
+    period_totals_dr = {p[0]: 0.0 for p in periods}
+    period_totals_cr = {p[0]: 0.0 for p in periods}
+
+    for acct_type in type_order:
+        accts = [a for a in sorted_accts if a["type"] == acct_type]
+        if not accts:
+            continue
+        # Section header
+        row = {"Account #": "", "Account Name": f"── {acct_type}s ──"}
+        for label, _, _ in periods:
+            row[f"{label} Dr"] = ""
+            row[f"{label} Cr"] = ""
+        rows.append(row)
+
+        for acct in accts:
+            row = {"Account #": acct["number"], "Account Name": acct["name"]}
+            for label, _, p_end in periods:
+                bal = compute_cumulative_balances_as_of(p_end).get(acct["id"], 0.0)
+                if acct["normal"] == "Debit":
+                    if bal >= 0:
+                        row[f"{label} Dr"] = fmt_acct(bal)
+                        row[f"{label} Cr"] = ""
+                        period_totals_dr[label] += bal
+                    else:
+                        row[f"{label} Dr"] = ""
+                        row[f"{label} Cr"] = fmt_acct(abs(bal))
+                        period_totals_cr[label] += abs(bal)
+                else:
+                    if bal >= 0:
+                        row[f"{label} Dr"] = ""
+                        row[f"{label} Cr"] = fmt_acct(bal)
+                        period_totals_cr[label] += bal
+                    else:
+                        row[f"{label} Dr"] = fmt_acct(abs(bal))
+                        row[f"{label} Cr"] = ""
+                        period_totals_dr[label] += abs(bal)
+            rows.append(row)
+
+    # Totals row
+    totals_row = {"Account #": "", "Account Name": "TOTALS"}
+    for label, _, _ in periods:
+        totals_row[f"{label} Dr"] = fmt_acct(period_totals_dr[label])
+        totals_row[f"{label} Cr"] = fmt_acct(period_totals_cr[label])
+    rows.append(totals_row)
+
+    return pd.DataFrame(rows)
+
+
+def generate_income_statement(start_dt, end_dt, grouping):
+    """Generate multi-step Income Statement for each period."""
+    periods = get_period_boundaries(start_dt, end_dt, grouping)
+    sorted_accts = sorted(st.session_state.accounts, key=lambda a: a["number"])
+    show_total = len(periods) > 1
+
+    revenue_accts = [a for a in sorted_accts if a["type"] == "Revenue"]
+    cogs_accts = [a for a in sorted_accts if a["id"] == "x5000"]
+    opex_accts = [a for a in sorted_accts if a["type"] == "Expense" and a["id"] != "x5000"]
+
+    rows = []
+
+    def make_row(label, values, bold=False):
+        prefix = "**" if bold else ""
+        suffix = "**" if bold else ""
+        row = {"": f"{prefix}{label}{suffix}"}
+        for i, (plabel, _, _) in enumerate(periods):
+            row[plabel] = fmt_acct(values[i]) if values[i] is not None else ""
+        if show_total:
+            total = sum(v for v in values if v is not None)
+            row["Total"] = fmt_acct(total)
+        return row
+
+    def blank_row():
+        row = {"": ""}
+        for plabel, _, _ in periods:
+            row[plabel] = ""
+        if show_total:
+            row["Total"] = ""
+        return row
+
+    # Compute activity for each period
+    period_activities = []
+    for _, p_start, p_end in periods:
+        period_activities.append(compute_activity(p_start, p_end))
+
+    # ── Revenue Section ──
+    rows.append(make_row("REVENUE", [None] * len(periods)))
+    revenue_totals = [0.0] * len(periods)
+    for acct in revenue_accts:
+        values = []
+        for i, act in enumerate(period_activities):
+            val = act.get(acct["id"], 0.0)
+            values.append(val)
+            revenue_totals[i] += val
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
+    rows.append(make_row("Total Revenue", revenue_totals, bold=True))
+    rows.append(blank_row())
+
+    # ── COGS Section ──
+    cogs_totals = [0.0] * len(periods)
+    if cogs_accts:
+        rows.append(make_row("COST OF GOODS SOLD", [None] * len(periods)))
+        for acct in cogs_accts:
+            values = []
+            for i, act in enumerate(period_activities):
+                val = act.get(acct["id"], 0.0)
+                values.append(val)
+                cogs_totals[i] += val
+            rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
+        rows.append(make_row("Total COGS", cogs_totals, bold=True))
+        rows.append(blank_row())
+
+    # ── Gross Profit ──
+    gross_profit = [revenue_totals[i] - cogs_totals[i] for i in range(len(periods))]
+    rows.append(make_row("GROSS PROFIT", gross_profit, bold=True))
+    rows.append(blank_row())
+
+    # ── Operating Expenses ──
+    rows.append(make_row("OPERATING EXPENSES", [None] * len(periods)))
+    opex_totals = [0.0] * len(periods)
+    for acct in opex_accts:
+        values = []
+        for i, act in enumerate(period_activities):
+            val = act.get(acct["id"], 0.0)
+            values.append(val)
+            opex_totals[i] += val
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
+    rows.append(make_row("Total Operating Expenses", opex_totals, bold=True))
+    rows.append(blank_row())
+
+    # ── Net Income ──
+    net_income = [gross_profit[i] - opex_totals[i] for i in range(len(periods))]
+    rows.append(make_row("NET INCOME (LOSS)", net_income, bold=True))
+
+    return pd.DataFrame(rows)
+
+
+def generate_balance_sheet(start_dt, end_dt, grouping):
+    """Generate Balance Sheet: cumulative balances as of each period end."""
+    periods = get_period_boundaries(start_dt, end_dt, grouping)
+    sorted_accts = sorted(st.session_state.accounts, key=lambda a: a["number"])
+
+    asset_accts = [a for a in sorted_accts if a["type"] == "Asset"]
+    liability_accts = [a for a in sorted_accts if a["type"] == "Liability"]
+    equity_accts = [a for a in sorted_accts if a["type"] == "Equity"]
+    revenue_accts = [a for a in sorted_accts if a["type"] == "Revenue"]
+    expense_accts = [a for a in sorted_accts if a["type"] == "Expense"]
+
+    # Pre-compute cumulative balances for each period end
+    period_balances = []
+    for _, _, p_end in periods:
+        period_balances.append(compute_cumulative_balances_as_of(p_end))
+
+    rows = []
+
+    def make_row(label, values, bold=False):
+        prefix = "**" if bold else ""
+        suffix = "**" if bold else ""
+        row = {"": f"{prefix}{label}{suffix}"}
+        for i, (plabel, _, _) in enumerate(periods):
+            as_of = periods[i][2].strftime("%m/%d/%Y")
+            col = f"As of {as_of}" if len(periods) == 1 else plabel
+            row[col] = fmt_acct(values[i]) if values[i] is not None else ""
+        return row
+
+    def blank_row():
+        row = {"": ""}
+        for i, (plabel, _, _) in enumerate(periods):
+            as_of = periods[i][2].strftime("%m/%d/%Y")
+            col = f"As of {as_of}" if len(periods) == 1 else plabel
+            row[col] = ""
+        return row
+
+    # ── Assets ──
+    rows.append(make_row("ASSETS", [None] * len(periods)))
+    asset_totals = [0.0] * len(periods)
+    for acct in asset_accts:
+        values = []
+        for i, bals in enumerate(period_balances):
+            val = bals.get(acct["id"], 0.0)
+            # Accumulated Depreciation is contra-asset, show as negative
+            if acct["normal"] == "Credit":
+                val = -val
+            values.append(val)
+            asset_totals[i] += val
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
+    rows.append(make_row("Total Assets", asset_totals, bold=True))
+    rows.append(blank_row())
+
+    # ── Liabilities ──
+    rows.append(make_row("LIABILITIES", [None] * len(periods)))
+    liability_totals = [0.0] * len(periods)
+    for acct in liability_accts:
+        values = []
+        for i, bals in enumerate(period_balances):
+            val = bals.get(acct["id"], 0.0)
+            values.append(val)
+            liability_totals[i] += val
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
+    rows.append(make_row("Total Liabilities", liability_totals, bold=True))
+    rows.append(blank_row())
+
+    # ── Equity ──
+    rows.append(make_row("EQUITY", [None] * len(periods)))
+    equity_totals = [0.0] * len(periods)
+    for acct in equity_accts:
+        values = []
+        for i, bals in enumerate(period_balances):
+            val = bals.get(acct["id"], 0.0)
+            if acct["normal"] == "Debit":
+                val = -val  # Dividends reduce equity
+            values.append(val)
+            equity_totals[i] += val
+        rows.append(make_row(f"  {acct['number']} {acct['name']}", values))
+
+    # Net Income (cumulative Revenue - Expenses through period end)
+    net_income_values = []
+    for i, bals in enumerate(period_balances):
+        rev = sum(bals.get(a["id"], 0.0) for a in revenue_accts)
+        exp = sum(bals.get(a["id"], 0.0) for a in expense_accts)
+        ni = rev - exp
+        net_income_values.append(ni)
+        equity_totals[i] += ni
+    rows.append(make_row("  Net Income (Current Period)", net_income_values))
+    rows.append(make_row("Total Equity", equity_totals, bold=True))
+    rows.append(blank_row())
+
+    # ── Total L&E ──
+    total_le = [liability_totals[i] + equity_totals[i] for i in range(len(periods))]
+    rows.append(make_row("TOTAL LIABILITIES & EQUITY", total_le, bold=True))
+
+    return pd.DataFrame(rows)
+
+
+def generate_cash_flow_statement(start_dt, end_dt, grouping):
+    """Generate Statement of Cash Flows using the indirect method."""
+    periods = get_period_boundaries(start_dt, end_dt, grouping)
+    sorted_accts = sorted(st.session_state.accounts, key=lambda a: a["number"])
+    show_total = len(periods) > 1
+
+    rows = []
+
+    def make_row(label, values, bold=False):
+        prefix = "**" if bold else ""
+        suffix = "**" if bold else ""
+        row = {"": f"{prefix}{label}{suffix}"}
+        for i, (plabel, _, _) in enumerate(periods):
+            row[plabel] = fmt_acct(values[i]) if values[i] is not None else ""
+        if show_total:
+            total = sum(v for v in values if v is not None)
+            row["Total"] = fmt_acct(total)
+        return row
+
+    def blank_row():
+        row = {"": ""}
+        for plabel, _, _ in periods:
+            row[plabel] = ""
+        if show_total:
+            row["Total"] = ""
+        return row
+
+    # Pre-compute raw activity (debit - credit) for each period
+    period_raw = []
+    for _, p_start, p_end in periods:
+        period_raw.append(compute_raw_activity(p_start, p_end))
+
+    # Pre-compute normal-direction activity for each period
+    period_normal = []
+    for _, p_start, p_end in periods:
+        period_normal.append(compute_activity(p_start, p_end))
+
+    revenue_accts = [a for a in sorted_accts if a["type"] == "Revenue"]
+    expense_accts = [a for a in sorted_accts if a["type"] == "Expense"]
+
+    # ── Net Income ──
+    net_income = []
+    for i, act in enumerate(period_normal):
+        rev = sum(act.get(a["id"], 0.0) for a in revenue_accts)
+        exp = sum(act.get(a["id"], 0.0) for a in expense_accts)
+        net_income.append(rev - exp)
+
+    # ══ OPERATING ACTIVITIES ══
+    rows.append(make_row("OPERATING ACTIVITIES", [None] * len(periods)))
+    rows.append(make_row("  Net Income", net_income))
+
+    # Adjustments for non-cash items
+    rows.append(make_row("  Adjustments for non-cash items:", [None] * len(periods)))
+
+    # Depreciation add-back
+    depr_values = []
+    for i, act in enumerate(period_normal):
+        depr_values.append(act.get(DEPRECIATION_EXPENSE_ID, 0.0))
+    if any(abs(v) > 0.005 for v in depr_values):
+        rows.append(make_row("    Depreciation & Amortization", depr_values))
+
+    # Changes in working capital
+    rows.append(make_row("  Changes in working capital:", [None] * len(periods)))
+
+    operating_adjustments = [0.0] * len(periods)
+    for v in depr_values:
+        for i in range(len(periods)):
+            pass
+    # Track total depreciation
+    total_depr = list(depr_values)
+
+    # Operating assets (increase = cash outflow = negative)
+    op_asset_ids = set()
+    for acct in sorted_accts:
+        cf_class = classify_for_cashflow(acct)
+        if cf_class == "operating_asset":
+            op_asset_ids.add(acct["id"])
+            values = []
+            for i, raw in enumerate(period_raw):
+                # Raw activity is debit - credit. For assets, increase is debit.
+                # Increase in asset = used cash = negative for cash flow
+                change = -(raw.get(acct["id"], 0.0))
+                values.append(change)
+                operating_adjustments[i] += change
+            if any(abs(v) > 0.005 for v in values):
+                rows.append(make_row(f"    {acct['name']}", values))
+
+    # Operating liabilities (increase = cash inflow = positive)
+    for acct in sorted_accts:
+        cf_class = classify_for_cashflow(acct)
+        if cf_class == "operating_liability":
+            values = []
+            for i, raw in enumerate(period_raw):
+                # Raw activity is debit - credit. For liabilities, increase is credit (negative raw).
+                # Increase in liability = source of cash = positive
+                change = -(raw.get(acct["id"], 0.0))
+                values.append(change)
+                operating_adjustments[i] += change
+            if any(abs(v) > 0.005 for v in values):
+                rows.append(make_row(f"    {acct['name']}", values))
+
+    # Accum depreciation change (already handled via depreciation add-back, but
+    # the balance sheet change in accum depr needs to net out if tracked separately)
+    # For indirect method: depr expense add-back covers the non-cash portion.
+    # Accum depr changes that aren't from depr expense (e.g., asset disposal) would
+    # show here, but we'll keep it simple.
+
+    net_cash_operating = [
+        net_income[i] + total_depr[i] + operating_adjustments[i]
+        for i in range(len(periods))
+    ]
+    rows.append(blank_row())
+    rows.append(make_row("Net Cash from Operating Activities", net_cash_operating, bold=True))
+    rows.append(blank_row())
+
+    # ══ INVESTING ACTIVITIES ══
+    rows.append(make_row("INVESTING ACTIVITIES", [None] * len(periods)))
+    investing_total = [0.0] * len(periods)
+    for acct in sorted_accts:
+        cf_class = classify_for_cashflow(acct)
+        if cf_class == "investing":
+            values = []
+            for i, raw in enumerate(period_raw):
+                # Increase in PP&E (debit) = cash outflow = negative
+                change = -(raw.get(acct["id"], 0.0))
+                values.append(change)
+                investing_total[i] += change
+            if any(abs(v) > 0.005 for v in values):
+                rows.append(make_row(f"  {acct['name']}", values))
+
+    rows.append(make_row("Net Cash from Investing Activities", investing_total, bold=True))
+    rows.append(blank_row())
+
+    # ══ FINANCING ACTIVITIES ══
+    rows.append(make_row("FINANCING ACTIVITIES", [None] * len(periods)))
+    financing_total = [0.0] * len(periods)
+    for acct in sorted_accts:
+        cf_class = classify_for_cashflow(acct)
+        if cf_class == "financing":
+            values = []
+            for i, raw in enumerate(period_raw):
+                if acct["normal"] == "Debit":
+                    # Debit-normal equity (e.g., Dividends Paid): increase = outflow
+                    change = -(raw.get(acct["id"], 0.0))
+                else:
+                    # Credit-normal: increase (credit) = inflow
+                    change = -(raw.get(acct["id"], 0.0))
+                values.append(change)
+                financing_total[i] += change
+            if any(abs(v) > 0.005 for v in values):
+                rows.append(make_row(f"  {acct['name']}", values))
+
+    rows.append(make_row("Net Cash from Financing Activities", financing_total, bold=True))
+    rows.append(blank_row())
+
+    # ══ SUMMARY ══
+    net_change = [
+        net_cash_operating[i] + investing_total[i] + financing_total[i]
+        for i in range(len(periods))
+    ]
+    rows.append(make_row("NET CHANGE IN CASH", net_change, bold=True))
+
+    # Beginning and ending cash
+    beginning_cash = []
+    ending_cash = []
+    for i, (_, p_start, p_end) in enumerate(periods):
+        # Beginning cash = cumulative cash balance before period start
+        day_before = p_start - timedelta(days=1)
+        beg_bals = compute_cumulative_balances_as_of(day_before)
+        beg = sum(beg_bals.get(cid, 0.0) for cid in CASH_ACCOUNT_IDS)
+        beginning_cash.append(beg)
+
+        end_bals = compute_cumulative_balances_as_of(p_end)
+        end = sum(end_bals.get(cid, 0.0) for cid in CASH_ACCOUNT_IDS)
+        ending_cash.append(end)
+
+    rows.append(make_row("Beginning Cash Balance", beginning_cash))
+    rows.append(make_row("ENDING CASH BALANCE", ending_cash, bold=True))
+
+    return pd.DataFrame(rows)
+
+
 # ── App Header ──────────────────────────────────────────────────────────────
 st.title("Account Ledger")
 
 # ── Tabs ────────────────────────────────────────────────────────────────────
-tab_journal, tab_ledger, tab_accounts = st.tabs(["Journal Entries", "General Ledger", "Chart of Accounts"])
+tab_journal, tab_ledger, tab_accounts, tab_reports = st.tabs(
+    ["Journal Entries", "General Ledger", "Chart of Accounts", "Reports"]
+)
 
 # ══════════════════════════════════════════════════════════════════════
 # JOURNAL ENTRIES TAB
@@ -556,3 +1155,89 @@ with tab_accounts:
             })
 
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════
+# REPORTS TAB
+# ══════════════════════════════════════════════════════════════════════
+with tab_reports:
+    st.subheader("Financial Reports")
+
+    # ── Report Controls ──────────────────────────────────────────────
+    ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([2, 1.5, 1.5, 1.5])
+    with ctrl1:
+        report_type = st.selectbox(
+            "Report",
+            ["Income Statement", "Balance Sheet", "Trial Balance", "Statement of Cash Flows"],
+        )
+    with ctrl2:
+        # Determine sensible date defaults from existing entries
+        if st.session_state.entries:
+            all_dates = [e["date"] for e in st.session_state.entries]
+            min_date = datetime.strptime(min(all_dates), "%Y-%m-%d").date()
+            max_date = datetime.strptime(max(all_dates), "%Y-%m-%d").date()
+            default_start = min_date.replace(month=1, day=1)
+            default_end = max_date.replace(month=12, day=31)
+        else:
+            default_start = date.today().replace(month=1, day=1)
+            default_end = date.today().replace(month=12, day=31)
+
+        report_start = st.date_input("From", value=default_start, key="rpt_start")
+    with ctrl3:
+        report_end = st.date_input("To", value=default_end, key="rpt_end")
+    with ctrl4:
+        grouping = st.selectbox("Group By", ["None", "Monthly", "Quarterly", "Yearly"])
+
+    if report_start > report_end:
+        st.error("Start date must be on or before end date.")
+    elif not st.session_state.entries:
+        st.info("Post journal entries to generate reports.")
+    else:
+        # ── Generate Report ──────────────────────────────────────────
+        with st.spinner("Generating report..."):
+            if report_type == "Trial Balance":
+                report_df = generate_trial_balance(report_start, report_end, grouping)
+            elif report_type == "Income Statement":
+                report_df = generate_income_statement(report_start, report_end, grouping)
+            elif report_type == "Balance Sheet":
+                report_df = generate_balance_sheet(report_start, report_end, grouping)
+            elif report_type == "Statement of Cash Flows":
+                report_df = generate_cash_flow_statement(report_start, report_end, grouping)
+            else:
+                report_df = pd.DataFrame()
+
+        if report_df.empty:
+            st.info("No data for the selected report and date range.")
+        else:
+            # ── Report Header ────────────────────────────────────────
+            if report_type in ("Income Statement", "Trial Balance", "Statement of Cash Flows"):
+                period_desc = f"For the Period {report_start.strftime('%B %d, %Y')} through {report_end.strftime('%B %d, %Y')}"
+            else:
+                period_desc = f"As of {report_end.strftime('%B %d, %Y')}"
+            st.caption(period_desc)
+
+            # ── Display Report ───────────────────────────────────────
+            st.dataframe(
+                report_df,
+                hide_index=True,
+                use_container_width=True,
+                height=min(len(report_df) * 38 + 40, 800),
+            )
+
+            # ── CSV Export ───────────────────────────────────────────
+            csv_df = report_df.copy()
+            for col in csv_df.columns:
+                csv_df[col] = csv_df[col].astype(str).str.replace(r"\*\*", "", regex=True)
+            csv_data = csv_df.to_csv(index=False)
+
+            file_name = (
+                report_type.lower().replace(" ", "_")
+                + f"_{report_start.strftime('%Y%m%d')}_{report_end.strftime('%Y%m%d')}.csv"
+            )
+
+            st.download_button(
+                label="Export to CSV",
+                data=csv_data,
+                file_name=file_name,
+                mime="text/csv",
+                type="secondary",
+            )
